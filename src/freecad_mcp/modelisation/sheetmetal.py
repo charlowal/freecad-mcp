@@ -15,11 +15,14 @@ import sys
 try:
     import SheetMetalUnfoldCmd
 except ImportError:
-    # Installed after FreeCAD started: its folder is not on sys.path yet
-    _folder = os.path.join(FreeCAD.getUserAppDataDir(), "Mod", "SheetMetal")
-    if not os.path.isdir(_folder):
+    # Installed after FreeCAD started: its folder is not on sys.path yet. The
+    # Addon Manager names it "sheetmetal", a git clone "SheetMetal".
+    _mod = os.path.join(FreeCAD.getUserAppDataDir(), "Mod")
+    _folders = [os.path.join(_mod, d) for d in (os.listdir(_mod) if os.path.isdir(_mod) else [])
+                if d.lower() == "sheetmetal" and os.path.isfile(os.path.join(_mod, d, "SheetMetalUnfoldCmd.py"))]
+    if not _folders:
         raise ValueError("The SheetMetal workbench is not installed: add it with FreeCAD's Addon Manager (Tools > Addon manager > SheetMetal)")
-    sys.path.append(_folder)
+    sys.path.append(_folders[0])
     import SheetMetalUnfoldCmd
 """
 
