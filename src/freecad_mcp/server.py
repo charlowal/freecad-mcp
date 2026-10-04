@@ -14,6 +14,11 @@ except ImportError:
     from mcp.server.mcpserver import MCPServer as FastMCP
 from mcp.types import ImageContent, TextContent
 
+try:
+    from mcp.server.fastmcp.exceptions import ToolError
+except ImportError:
+    from mcp.server.mcpserver.exceptions import ToolError
+
 from .freecad_client import FreeCADConnection
 from .modelisation import register_modelling_tools
 from .operations import (
@@ -86,7 +91,14 @@ def tool(fn: Callable[..., ToolResponse]) -> Callable[..., ToolResponse]:
 
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> ToolResponse:
-        response = fn(*args, **kwargs)
+        try:
+            response = fn(*args, **kwargs)
+        except ToolError:
+            raise
+        except Exception as exc:
+            # mcp 2.x shows any other exception as "Error executing tool X";
+            # the reason (FreeCAD busy, no such document) is what the client needs
+            raise ToolError(f"{type(exc).__name__}: {exc}") from exc
         notice, state.version_notice = state.version_notice, None
         if notice:
             return [TextContent(type="text", text=f"Warning: {notice}"), *response]
