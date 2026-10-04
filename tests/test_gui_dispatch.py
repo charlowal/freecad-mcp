@@ -65,7 +65,8 @@ def load_gui_dispatch() -> Iterator[types.ModuleType]:
     saved = {name: sys.modules.get(name, missing) for name in module_names}
 
     freecad = types.ModuleType("FreeCAD")
-    freecad.Console = types.SimpleNamespace(PrintError=lambda _message: None, PrintWarning=lambda _message: None)
+    freecad.Console = types.SimpleNamespace(PrintError=lambda _message: None, PrintWarning=lambda _message: None,
+                                            PrintMessage=lambda _message: None)
 
     status_bar = FakeStatusBar()
     freecad_gui = types.ModuleType("FreeCADGui")
@@ -141,6 +142,7 @@ def test_a_tool_refusal_is_logged_on_one_line_and_other_errors_in_full() -> None
         logged: list[tuple[str, str]] = []
         gui_dispatch.FreeCAD.Console.PrintError = lambda m: logged.append(("error", m))
         gui_dispatch.FreeCAD.Console.PrintWarning = lambda m: logged.append(("warning", m))
+        gui_dispatch.FreeCAD.Console.PrintMessage = lambda m: logged.append(("message", m))
 
         class ToolRefusal(Exception):
             pass
@@ -157,7 +159,8 @@ def test_a_tool_refusal_is_logged_on_one_line_and_other_errors_in_full() -> None
 
         assert refused.startswith("ToolRefusal: Pocket removed no material")
         assert crashed.startswith("RuntimeError: boom")
-        assert logged[0] == ("warning", "MCP tool refused: Pocket removed no material; retry with reversed=True\n")
+        # a message, not a warning: FreeCAD's notification area shows warnings
+        assert logged[0] == ("message", "MCP tool refused: Pocket removed no material; retry with reversed=True\n")
         assert logged[1][0] == "error" and "Traceback" in logged[1][1]
 
 

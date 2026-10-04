@@ -298,8 +298,10 @@ def dispatch_to_gui(
             except Exception as e:
                 if type(e).__name__ == "ToolRefusal":
                     # A modelling tool turned its input down with a hint for
-                    # the client: one line, not a traceback.
-                    FreeCAD.Console.PrintWarning(f"MCP tool refused: {e}\n")
+                    # the client: one line, not a traceback, and a plain
+                    # message, since FreeCAD's notification area pops up every
+                    # warning and error and a refusal is neither.
+                    FreeCAD.Console.PrintMessage(f"MCP tool refused: {e}\n")
                 else:
                     FreeCAD.Console.PrintError(
                         f"MCP RPC: GUI task raised {type(e).__name__}: {e}\n"
