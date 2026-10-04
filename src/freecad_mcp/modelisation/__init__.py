@@ -41,6 +41,7 @@ class _ReportErrors:
     def __init__(self, mcp: Any, skip: frozenset[str] = frozenset()) -> None:
         self._mcp = mcp
         self._skip = skip
+        self.registered: list[str] = []
 
     def tool(self, *args: Any, **kwargs: Any) -> Callable[[Callable[..., Any]], Any]:
         register = self._mcp.tool(*args, **kwargs)
@@ -48,6 +49,7 @@ class _ReportErrors:
         def decorate(fn: Callable[..., Any]) -> Any:
             if fn.__name__ in self._skip:
                 return fn
+            self.registered.append(fn.__name__)
             @functools.wraps(fn)
             async def wrapper(*fn_args: Any, **fn_kwargs: Any) -> Any:
                 try:
@@ -74,18 +76,29 @@ TOOL_MODULES = (
 )
 
 
-def register_tools(mcp: Any, get_bridge: Callable[[], Any]) -> None:
-    """Register every tool module on ``mcp`` with the given bridge."""
+def register_tools(mcp: Any, get_bridge: Callable[[], Any]) -> dict[str, list[str]]:
+    """Register every tool module on ``mcp`` with the given bridge.
+
+    Returns the tool names by group, a group being its module's name
+    ("partdesign", "drawing"...).
+    """
     registry = _ReportErrors(mcp, skip=SKIPPED_TOOLS)
+    groups: dict[str, list[str]] = {}
     for register_module in TOOL_MODULES:
+        start = len(registry.registered)
         register_module(registry, get_bridge)
+        groups[register_module.__module__.rsplit(".", 1)[-1]] = registry.registered[start:]
+    return groups
 
 
-def register_modelling_tools(mcp: Any, get_connection: Callable[[], Any]) -> None:
-    """Register the tools on ``mcp``, talking to FreeCAD via ``get_connection``."""
+def register_modelling_tools(mcp: Any, get_connection: Callable[[], Any]) -> dict[str, list[str]]:
+    """Register the tools on ``mcp``, talking to FreeCAD via ``get_connection``.
+
+    Returns the tool names by group, as :func:`register_tools`.
+    """
     bridge = ExecuteCodeBridge(get_connection)
 
     async def get_bridge() -> ExecuteCodeBridge:
         return bridge
 
-    register_tools(mcp, get_bridge)
+    return register_tools(mcp, get_bridge)

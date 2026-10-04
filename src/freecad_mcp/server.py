@@ -797,7 +797,31 @@ def run_fem_analysis(
     )
 
 
-register_modelling_tools(mcp, get_freecad_connection)
+MODELLING_GROUPS = register_modelling_tools(mcp, get_freecad_connection)
+
+
+def keep_tool_groups(spec: str) -> list[str]:
+    """Remove every tool outside the groups named in ``spec``, e.g. "base,drawing".
+
+    "base" is the addon's own tools (execute_code, get_view...); the other
+    groups are the modelling modules. Each tool schema goes into the model's
+    prompt on every turn, so a small local model works better with only the
+    groups the task needs. Returns the names of the tools kept.
+    """
+    import asyncio
+
+    names = [t.name for t in asyncio.run(mcp.list_tools())]
+    modelling = {n for group in MODELLING_GROUPS.values() for n in group}
+    groups = {"base": [n for n in names if n not in modelling], **MODELLING_GROUPS}
+    wanted = [g.strip().lower() for g in spec.split(",") if g.strip()]
+    unknown = [g for g in wanted if g not in groups]
+    if unknown or not wanted:
+        raise ValueError(f"Unknown tool group(s) {', '.join(unknown) or '(none given)'}; choose among: {', '.join(groups)}")
+    keep = {n for g in wanted for n in groups[g]}
+    for name in names:
+        if name not in keep:
+            mcp.remove_tool(name)
+    return [n for n in names if n in keep]
 
 
 @mcp.prompt()
@@ -838,6 +862,14 @@ def main():
         "other users can read command-line arguments; omit if the addon has "
         "no token set)",
     )
+    parser.add_argument(
+        "--tools",
+        default=None,
+        help="Tool groups to expose, comma separated, e.g. 'base,files,inspection' "
+        "(groups: base, " + ", ".join(MODELLING_GROUPS) + "; default: all; falls "
+        "back to the FREECAD_MCP_TOOLS environment variable). Fewer tools make a "
+        "smaller prompt, which helps a small local model",
+    )
     parser.add_argument("--freecadcmd", default=None, help="Command that starts headless FreeCAD for execute_code_headless, e.g. 'flatpak run --command=freecadcmd org.freecad.FreeCAD' (default: auto-detect PATH, then Flatpak)")
     args = parser.parse_args()
     state.only_text_feedback = args.only_text_feedback
@@ -849,4 +881,11 @@ def main():
     logger.info(f"Connecting to FreeCAD RPC server at: {state.rpc_host}")
     if state.auth_token:
         logger.info("Auth token configured for RPC connection")
+    groups = args.tools or os.environ.get("FREECAD_MCP_TOOLS")
+    if groups:
+        try:
+            kept = keep_tool_groups(groups)
+        except ValueError as e:
+            parser.error(str(e))
+        logger.info(f"Tool groups {groups}: {len(kept)} tools")
     mcp.run()
