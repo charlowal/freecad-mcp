@@ -15,6 +15,7 @@ except ImportError:
 from mcp.types import ImageContent, TextContent
 
 from .freecad_client import FreeCADConnection
+from .modelisation import register_modelling_tools
 from .operations import (
     create_document_operation,
     create_object_operation,
@@ -782,6 +783,9 @@ def run_fem_analysis(
         include_screenshot,
         view_name,
     )
+
+
+register_modelling_tools(mcp, get_freecad_connection)
 
 
 @mcp.prompt()

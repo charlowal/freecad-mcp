@@ -1,0 +1,520 @@
+"""Live bench for the modelling tools (PartDesign, Sketcher, Spreadsheet).
+
+Needs a running FreeCAD with the addon's RPC server; not collected by pytest.
+
+    FREECAD_MCP_TOKEN=... python tests/integration/bench_modelling.py
+
+Every tool is called as an MCP client would call it, then judged by a
+measurement read directly from FreeCAD, independent of the tool's answer:
+
+    OK             the expected effect is measured
+    ERROR          the tool raised where it should have worked
+    FALSE_SUCCESS  the tool reported success but the measurement disagrees
+
+A case that must be refused (a pocket into empty space) is OK only if the
+tool raises with a usable hint and leaves the model unchanged. The bench
+opens and closes its own documents (Bench*) without saving them.
+"""
+
+import asyncio
+import json
+import math
+import os
+import sys
+from collections import Counter
+from typing import Any
+
+from freecad_mcp.freecad_client import FreeCADConnection
+from freecad_mcp.modelisation.bridge import ExecuteCodeBridge
+from freecad_mcp.modelisation.partdesign import register_partdesign_tools
+from freecad_mcp.modelisation.spreadsheet import register_spreadsheet_tools
+
+CONNECTION = FreeCADConnection(host="localhost", port=9875, token=os.environ.get("FREECAD_MCP_TOKEN"))
+SHARED_DIR = os.environ.get("BENCH_SHARED_DIR", os.path.expanduser("~/snap/freecad/common/mcp-headless"))
+RESULTS: list[tuple[str, str, str, str]] = []
+PI = math.pi
+
+
+class _Registry:
+    def __init__(self) -> None:
+        self.tools: dict[str, Any] = {}
+
+    def tool(self, *args: Any, **kwargs: Any):
+        def register(fn):
+            self.tools[fn.__name__] = fn
+            return fn
+
+        return register
+
+
+def _load_tools() -> dict[str, Any]:
+    registry, bridge = _Registry(), ExecuteCodeBridge(lambda: CONNECTION)
+
+    async def get_bridge():
+        return bridge
+
+    register_partdesign_tools(registry, get_bridge)
+    register_spreadsheet_tools(registry, get_bridge)
+    return registry.tools
+
+
+T = _load_tools()
+
+
+def q(code: str) -> Any:
+    """Run a check in FreeCAD; the code leaves its answer in R."""
+    reply = CONNECTION.execute_code("import json as _j\nR = None\n" + code + "\nprint('__Q__' + _j.dumps(R, default=str))")
+    text = reply.get("message", "") + str(reply.get("error", ""))
+    if "__Q__" not in text:
+        raise RuntimeError(text[-400:])
+    return json.loads(text.split("__Q__", 1)[1].splitlines()[0])
+
+
+async def call(_tool: str, **kwargs: Any) -> tuple[bool, Any]:
+    try:
+        return True, await T[_tool](**kwargs)
+    except Exception as e:  # noqa: BLE001
+        lines = [line for line in str(e).splitlines() if line.strip()]
+        return False, (lines[-1] if lines else repr(e))[:220]
+
+
+def note(group: str, case: str, verdict: str, detail: str = "") -> None:
+    RESULTS.append((group, case, verdict, detail))
+    print(f"{verdict:13} {group:9} {case:34} {detail}"[:240], flush=True)
+
+
+def judge(group: str, case: str, ok: bool, reply: Any, condition: bool, detail_ok: str, detail_ko: str) -> None:
+    if not ok:
+        note(group, case, "ERROR", str(reply))
+    else:
+        note(group, case, "OK" if condition else "FALSE_SUCCESS", detail_ok if condition else detail_ko)
+
+
+# --------------------------------------------------------------------------- FreeCAD reads
+
+def sketch_state(doc: str, sk: str) -> dict:
+    return q(f"""
+_s = App.getDocument({doc!r}).getObject({sk!r}); _s.recompute()
+R = {{"geo": _s.GeometryCount, "cons": _s.ConstraintCount, "solve": _s.solve(), "ext": len(_s.ExternalGeo) - 2,
+     "constr": [_s.getConstruction(i) for i in range(_s.GeometryCount)],
+     "types": [c.Type for c in _s.Constraints], "g": []}}
+for _g in _s.Geometry:
+    _d = {{"t": type(_g).__name__}}
+    if type(_g).__name__ == "LineSegment":
+        _d.update(x1=_g.StartPoint.x, y1=_g.StartPoint.y, x2=_g.EndPoint.x, y2=_g.EndPoint.y)
+    if hasattr(_g, "Radius"):
+        _d.update(r=_g.Radius, cx=_g.Center.x, cy=_g.Center.y)
+    R["g"].append(_d)
+""")
+
+
+def solid(doc: str, obj: str) -> dict:
+    return q(f"""
+_d = App.getDocument({doc!r}); _d.recompute(); _o = _d.getObject({obj!r}); _sh = _o.Shape
+R = {{"vol": round(_sh.Volume, 2) if not _sh.isNull() else None, "valid": (not _sh.isNull()) and _sh.isValid(),
+     "faces": len(_sh.Faces) if not _sh.isNull() else 0,
+     "zmin": round(_sh.BoundBox.ZMin, 3) if not _sh.isNull() else None, "zmax": round(_sh.BoundBox.ZMax, 3) if not _sh.isNull() else None}}
+""")
+
+
+def body_state(doc: str, body: str) -> dict:
+    return q(f"""
+_d = App.getDocument({doc!r}); _d.recompute(); _b = _d.getObject({body!r})
+R = {{"tip": _b.Tip.Name if _b.Tip else None, "vol": round(_b.Shape.Volume, 2) if not _b.Shape.isNull() else 0,
+     "features": [o.Name for o in _b.Group if o.TypeId.startswith("PartDesign::") and o.TypeId not in ("PartDesign::Plane", "PartDesign::Line", "PartDesign::Point")]}}
+""")
+
+
+def close(doc: str) -> None:
+    q(f"R = [App.closeDocument(_d) for _d in list(App.listDocuments()) if _d == {doc!r}]")
+
+
+async def new_body(doc: str) -> str:
+    close(doc)
+    q(f"App.newDocument({doc!r}); R = True")
+    return (await T["create_partdesign_body"](doc_name=doc))["name"]
+
+
+async def sketch(doc: str, body: str, plane: str = "XY_Plane", offset: float = 0.0) -> str:
+    return (await T["create_sketch"](body_name=body, plane=plane, offset=offset, doc_name=doc))["name"]
+
+
+async def plate(doc: str, body: str, x: float, y: float, w: float, h: float, t: float, reversed: bool = False) -> str:
+    sk = await sketch(doc, body)
+    await T["add_sketch_rectangle"](sketch_name=sk, x=x, y=y, width=w, height=h, doc_name=doc)
+    return (await T["pad_sketch"](sketch_name=sk, length=t, reversed=reversed, doc_name=doc))["name"]
+
+
+def top_face(doc: str, obj: str) -> str:
+    return q(f"""
+_sh = App.getDocument({doc!r}).getObject({obj!r}).Shape
+R = "Face" + str(max(range(len(_sh.Faces)), key=lambda i: _sh.Faces[i].CenterOfMass.z) + 1)
+""")
+
+
+# --------------------------------------------------------------------------- 1. sketch geometry
+
+async def bench_geometry() -> None:
+    G, D = "sketch", "BenchSketch"
+    b = await new_body(D)
+    s = await sketch(D, b)
+    cases = [
+        ("add_sketch_line", dict(x1=0, y1=0, x2=10, y2=0), 1),
+        ("add_sketch_arc", dict(center_x=0, center_y=20, radius=5, start_angle=0, end_angle=90), 1),
+        ("add_sketch_point", dict(x=3, y=3), 1),
+        ("add_sketch_circle", dict(center_x=30, center_y=0, radius=4), 1),
+        ("add_sketch_ellipse", dict(center_x=50, center_y=0, major_radius=6, minor_radius=3), 1),
+        ("add_sketch_polygon", dict(center_x=70, center_y=0, radius=5, sides=6), 6),
+        ("add_sketch_slot", dict(center1_x=0, center1_y=40, center2_x=20, center2_y=40, radius=3), 4),
+        ("add_sketch_bspline", dict(points=[[0, 60], [10, 65], [20, 60], [30, 66]]), 1),
+        ("add_sketch_rectangle", dict(x=40, y=40, width=10, height=5), 4),
+    ]
+    for tool, kwargs, expected in cases:
+        before = sketch_state(D, s)["geo"]
+        ok, reply = await call(tool, sketch_name=s, doc_name=D, **kwargs)
+        added = sketch_state(D, s)["geo"] - before
+        cond = added >= expected if tool == "add_sketch_polygon" else added == expected
+        judge(G, tool, ok, reply, cond, f"+{added} geometries", f"+{added} instead of +{expected}")
+    before = sketch_state(D, s)["geo"]
+    ok, reply = await call("add_sketch_line", sketch_name=s, x1=0, y1=-10, x2=10, y2=-10, construction=True, doc_name=D)
+    st = sketch_state(D, s)
+    judge(G, "add_sketch_line (construction)", ok, reply, st["geo"] == before + 1 and st["constr"][-1] is True,
+          "construction line", f"construction={st['constr'][-1]}")
+    ok, reply = await call("get_sketch_info", sketch_name=s, doc_name=D)
+    st = sketch_state(D, s)
+    seen = json.dumps(reply, default=str) if ok else ""
+    judge(G, "get_sketch_info", ok, reply, str(st["geo"]) in seen and str(st["cons"]) in seen,
+          f"reports {st['geo']} geometries / {st['cons']} constraints", f"reply lacks {st['geo']}/{st['cons']}: {seen[:90]}")
+    before = sketch_state(D, s)["constr"][0]
+    ok, reply = await call("toggle_construction", sketch_name=s, geometry_index=0, doc_name=D)
+    after = sketch_state(D, s)["constr"][0]
+    judge(G, "toggle_construction", ok, reply, after != before, f"{before} -> {after}", f"stays {after}")
+    before = sketch_state(D, s)["geo"]
+    ok, reply = await call("delete_sketch_geometry", sketch_name=s, geometry_index=before - 1, doc_name=D)
+    after = sketch_state(D, s)["geo"]
+    judge(G, "delete_sketch_geometry", ok, reply, after == before - 1, f"{before} -> {after}", f"{before} -> {after}")
+    close(D)
+
+
+# --------------------------------------------------------------------------- 2. constraints
+
+def length(g: dict) -> float:
+    return math.hypot(g["x2"] - g["x1"], g["y2"] - g["y1"])
+
+
+def heading(g: dict) -> float:
+    return math.degrees(math.atan2(g["y2"] - g["y1"], g["x2"] - g["x1"]))
+
+
+async def bench_constraints() -> None:
+    G, D = "constraint", "BenchConstraints"
+    b = await new_body(D)
+    L, C = "add_sketch_line", "add_sketch_circle"
+
+    async def fresh(*geometry):
+        s = await sketch(D, b)
+        for kind, kwargs in geometry:
+            await T[kind](sketch_name=s, doc_name=D, **kwargs)
+        return s
+
+    cross = lambda e: (e["g"][0]["x2"] - e["g"][0]["x1"]) * (e["g"][1]["y2"] - e["g"][1]["y1"]) - (e["g"][0]["y2"] - e["g"][0]["y1"]) * (e["g"][1]["x2"] - e["g"][1]["x1"])  # noqa: E731
+    dot = lambda e: (e["g"][0]["x2"] - e["g"][0]["x1"]) * (e["g"][1]["x2"] - e["g"][1]["x1"]) + (e["g"][0]["y2"] - e["g"][0]["y1"]) * (e["g"][1]["y2"] - e["g"][1]["y1"])  # noqa: E731
+    cases = [
+        ("constrain_horizontal", [(L, dict(x1=0, y1=0, x2=10, y2=3))], dict(geometry_index=0), lambda e: abs(e["g"][0]["y1"] - e["g"][0]["y2"]) < 1e-6, "y1 = y2"),
+        ("constrain_vertical", [(L, dict(x1=0, y1=0, x2=3, y2=10))], dict(geometry_index=0), lambda e: abs(e["g"][0]["x1"] - e["g"][0]["x2"]) < 1e-6, "x1 = x2"),
+        ("constrain_coincident", [(L, dict(x1=0, y1=0, x2=10, y2=0)), (L, dict(x1=10.5, y1=0.5, x2=15, y2=8))], dict(geometry1=0, point1=2, geometry2=1, point2=1),
+         lambda e: math.hypot(e["g"][0]["x2"] - e["g"][1]["x1"], e["g"][0]["y2"] - e["g"][1]["y1"]) < 1e-6, "end of 0 = start of 1"),
+        ("constrain_parallel", [(L, dict(x1=0, y1=0, x2=10, y2=0)), (L, dict(x1=0, y1=5, x2=10, y2=7))], dict(geometry1=0, geometry2=1), lambda e: abs(cross(e)) < 1e-6, "cross product 0"),
+        ("constrain_perpendicular", [(L, dict(x1=0, y1=0, x2=10, y2=0)), (L, dict(x1=0, y1=5, x2=2, y2=15))], dict(geometry1=0, geometry2=1), lambda e: abs(dot(e)) < 1e-6, "dot product 0"),
+        ("constrain_tangent", [(L, dict(x1=0, y1=0, x2=20, y2=0)), (C, dict(center_x=10, center_y=5, radius=3))], dict(geometry1=0, geometry2=1),
+         lambda e: abs(e["g"][0]["y1"] - e["g"][0]["y2"]) < 1e-9 and abs(abs(e["g"][1]["cy"] - e["g"][0]["y1"]) - e["g"][1]["r"]) < 1e-6, "centre-line distance = radius"),
+        ("constrain_equal", [(L, dict(x1=0, y1=0, x2=10, y2=0)), (L, dict(x1=0, y1=5, x2=7, y2=5))], dict(geometry1=0, geometry2=1), lambda e: abs(length(e["g"][0]) - length(e["g"][1])) < 1e-6, "equal lengths"),
+        ("constrain_distance", [(L, dict(x1=0, y1=0, x2=10, y2=0))], dict(geometry1=0, distance=15), lambda e: abs(length(e["g"][0]) - 15) < 1e-6, "length 15"),
+        ("constrain_distance_x", [(L, dict(x1=1, y1=1, x2=10, y2=2))], dict(geometry=0, point=1, distance=7), lambda e: abs(e["g"][0]["x1"] - 7) < 1e-6, "start x = 7"),
+        ("constrain_distance_y", [(L, dict(x1=1, y1=1, x2=10, y2=2))], dict(geometry=0, point=1, distance=4), lambda e: abs(e["g"][0]["y1"] - 4) < 1e-6, "start y = 4"),
+        ("constrain_radius", [(C, dict(center_x=0, center_y=0, radius=3))], dict(geometry_index=0, radius=6), lambda e: abs(e["g"][0]["r"] - 6) < 1e-6, "radius 6"),
+        ("constrain_angle", [(L, dict(x1=0, y1=0, x2=10, y2=2))], dict(geometry1=0, angle=30), lambda e: abs(heading(e["g"][0]) - 30) < 1e-4, "angle 30 deg"),
+        ("constrain_fix", [(L, dict(x1=0, y1=0, x2=10, y2=0))], dict(geometry_index=0), lambda e: "Block" in e["types"], "Block constraint"),
+        ("add_sketch_constraint", [(L, dict(x1=0, y1=0, x2=10, y2=0))], dict(constraint_type="Distance", geometry1=0, value=12), lambda e: abs(length(e["g"][0]) - 12) < 1e-6, "Distance 12 -> length 12"),
+    ]
+    for tool, geometry, kwargs, test, what in cases:
+        s = await fresh(*geometry)
+        before = sketch_state(D, s)["cons"]
+        ok, reply = await call(tool, sketch_name=s, doc_name=D, **kwargs)
+        st = sketch_state(D, s)
+        effect = bool(st["g"]) and test(st)
+        judge(G, tool, ok, reply, effect and st["cons"] == before + 1 and st["solve"] == 0,
+              f"{what} (solver={st['solve']}, +{st['cons'] - before} constraint)",
+              f"{what} not reached: {json.dumps(st['g'])[:110]} solver={st['solve']} constraints {before}->{st['cons']}")
+    s = await fresh((L, dict(x1=0, y1=0, x2=10, y2=0)))
+    await T["constrain_horizontal"](sketch_name=s, geometry_index=0, doc_name=D)
+    before = sketch_state(D, s)["cons"]
+    ok, reply = await call("delete_sketch_constraint", sketch_name=s, constraint_index=0, doc_name=D)
+    after = sketch_state(D, s)["cons"]
+    judge(G, "delete_sketch_constraint", ok, reply, after == before - 1, f"{before} -> {after}", f"{before} -> {after}")
+    close(D)
+
+
+# --------------------------------------------------------------------------- 3. features
+
+async def expect_volume(case: str, tool: str, doc: str, base: str, expected: float | None, tol: float, **kwargs: Any) -> str | None:
+    """Run a feature tool; OK when the volume matches (or changes, if expected is None)."""
+    v0 = solid(doc, base)["vol"]
+    ok, reply = await call(tool, doc_name=doc, **kwargs)
+    if not ok:
+        note("feature", case, "ERROR", str(reply))
+        return None
+    st = solid(doc, reply["name"])
+    reported = (reply.get("verification") or {}).get("volume_after")
+    honest = reported is not None and abs(reported - st["vol"]) < 0.01
+    if expected is None:
+        cond, what = st["valid"] and st["vol"] != v0, f"volume {v0} -> {st['vol']}"
+    else:
+        cond, what = st["valid"] and abs(st["vol"] - expected) <= tol, f"volume {st['vol']} (expected {round(expected, 2)})"
+    cond = cond and honest
+    note("feature", case, "OK" if cond else "FALSE_SUCCESS", what + ("" if honest else f" ; reported volume_after={reported}"))
+    return reply["name"]
+
+
+async def expect_refusal(case: str, tool: str, doc: str, body: str, hint: str, **kwargs: Any) -> None:
+    """OK when the tool raises with ``hint`` and the body is left as it was."""
+    before = body_state(doc, body)
+    ok, reply = await call(tool, doc_name=doc, **kwargs)
+    after = body_state(doc, body)
+    unchanged = after == before
+    if ok:
+        note("feature", case, "FALSE_SUCCESS", f"accepted: {str(reply)[:120]}")
+    elif hint in str(reply) and unchanged:
+        note("feature", case, "OK", f"refused, model unchanged ({after['vol']} mm3, tip {after['tip']})")
+    else:
+        note("feature", case, "ERROR", f"hint={hint in str(reply)} unchanged={unchanged}: {str(reply)[:120]}")
+
+
+async def bench_features() -> None:
+    disc = PI * 3 ** 2
+
+    D = "BenchPad"
+    b = await new_body(D)
+    s = await sketch(D, b)
+    await T["add_sketch_rectangle"](sketch_name=s, x=0, y=0, width=40, height=20, doc_name=D)
+    ok, reply = await call("pad_sketch", sketch_name=s, length=3, symmetric=True, doc_name=D)
+    st = solid(D, reply["name"]) if ok else {}
+    judge("feature", "pad_sketch symmetric", ok, reply, ok and abs(st["vol"] - 2400) < 0.01 and abs(st["zmin"] + 1.5) < 1e-3,
+          f"volume {st.get('vol')}, z {st.get('zmin')}..{st.get('zmax')}", f"volume {st.get('vol')}, z {st.get('zmin')}..{st.get('zmax')}")
+    close(D)
+
+    for case, tool, kwargs in (
+        ("pocket into empty space", "pocket_sketch", dict(length=2)),
+        ("hole into empty space", "create_hole", dict(diameter=6, depth=10)),
+    ):
+        D = "BenchRefusal"
+        b = await new_body(D)
+        p = await plate(D, b, 0, 0, 40, 20, 3)
+        s = await sketch(D, b)
+        await T["add_sketch_circle"](sketch_name=s, center_x=20, center_y=10, radius=3, doc_name=D)
+        await expect_refusal(case, tool, D, b, "reversed=True", sketch_name=s, **kwargs)
+        depth = 2 if tool == "pocket_sketch" else 3  # the 10 mm hole goes through the 3 mm plate
+        await expect_volume(case.split()[0] + " reversed=True", tool, D, p, 2400 - disc * depth, 0.5,
+                            sketch_name=s, reversed=True, **kwargs)
+        close(D)
+
+    D = "BenchPocket"
+    b = await new_body(D)
+    p = await plate(D, b, 0, 0, 40, 20, 3)
+    s = await sketch(D, b, plane=f"{p}:{top_face(D, p)}")
+    await T["add_sketch_circle"](sketch_name=s, center_x=20, center_y=10, radius=3, doc_name=D)
+    await expect_volume("pocket from the top face", "pocket_sketch", D, p, 2400 - disc * 2, 0.05, sketch_name=s, length=2)
+    close(D)
+    D = "BenchPocket"
+    b = await new_body(D)
+    p = await plate(D, b, 0, 0, 40, 20, 3, reversed=True)
+    s = await sketch(D, b)
+    await T["add_sketch_circle"](sketch_name=s, center_x=20, center_y=10, radius=3, doc_name=D)
+    await expect_volume("pocket ThroughAll", "pocket_sketch", D, p, 2400 - disc * 3, 0.05, sketch_name=s, length=1, type="ThroughAll")
+    close(D)
+
+    D = "BenchPattern"
+    b = await new_body(D)
+    await plate(D, b, 0, 0, 60, 20, 3, reversed=True)
+    s = await sketch(D, b)
+    await T["add_sketch_circle"](sketch_name=s, center_x=10, center_y=10, radius=3, doc_name=D)
+    pocket = (await T["pocket_sketch"](sketch_name=s, length=1, type="ThroughAll", doc_name=D))["name"]
+    await expect_volume("linear_pattern", "linear_pattern", D, pocket, 3600 - 3 * disc * 3, 0.1, feature_name=pocket, direction="X", length=40, occurrences=3)
+    close(D)
+    D = "BenchPolar"
+    b = await new_body(D)
+    s = await sketch(D, b)
+    await T["add_sketch_circle"](sketch_name=s, center_x=0, center_y=0, radius=20, doc_name=D)
+    await T["pad_sketch"](sketch_name=s, length=3, reversed=True, doc_name=D)
+    s = await sketch(D, b)
+    await T["add_sketch_circle"](sketch_name=s, center_x=12, center_y=0, radius=2, doc_name=D)
+    pocket = (await T["pocket_sketch"](sketch_name=s, length=1, type="ThroughAll", doc_name=D))["name"]
+    await expect_volume("polar_pattern", "polar_pattern", D, pocket, PI * 400 * 3 - 6 * PI * 4 * 3, 0.1, feature_name=pocket, axis="Z", occurrences=6)
+    close(D)
+    D = "BenchMirror"
+    b = await new_body(D)
+    await plate(D, b, -20, -10, 40, 20, 3, reversed=True)
+    s = await sketch(D, b)
+    await T["add_sketch_circle"](sketch_name=s, center_x=10, center_y=0, radius=3, doc_name=D)
+    pocket = (await T["pocket_sketch"](sketch_name=s, length=1, type="ThroughAll", doc_name=D))["name"]
+    await expect_volume("mirrored_feature", "mirrored_feature", D, pocket, 2400 - 2 * disc * 3, 0.1, feature_name=pocket, plane="YZ")
+    close(D)
+
+    for case, tool, kwargs in (
+        ("fillet (2 edges)", "fillet_edges", dict(radius=1, edges=["Edge1", "Edge3"])),
+        ("fillet (all edges)", "fillet_edges", dict(radius=1)),
+        ("chamfer (2 edges)", "chamfer_edges", dict(size=1, edges=["Edge1", "Edge3"])),
+        ("chamfer (all edges)", "chamfer_edges", dict(size=1)),
+    ):
+        D = "BenchEdges"
+        b = await new_body(D)
+        p = await plate(D, b, 0, 0, 40, 20, 3)
+        await expect_volume(case, tool, D, p, None, 0, object_name=p, **kwargs)
+        close(D)
+
+    D = "BenchShell"
+    b = await new_body(D)
+    p = await plate(D, b, 0, 0, 20, 20, 10)
+    await expect_volume("thickness_feature", "thickness_feature", D, p, 4000 - 18 * 18 * 9, 1.0, object_name=p, thickness=1, faces_to_remove=[top_face(D, p)])
+    close(D)
+    D = "BenchDraft"
+    b = await new_body(D)
+    p = await plate(D, b, 0, 0, 20, 20, 10)
+    await expect_volume("draft_feature (no faces given)", "draft_feature", D, p, None, 0, object_name=p, angle=5)
+    close(D)
+
+    D = "BenchRevolve"
+    b = await new_body(D)
+    s = await sketch(D, b, "XZ_Plane")
+    await T["add_sketch_rectangle"](sketch_name=s, x=5, y=0, width=5, height=10, doc_name=D)
+    ring = PI * (100 - 25) * 10
+    ok, reply = await call("revolution_sketch", sketch_name=s, axis="Base_Z", doc_name=D)
+    st = solid(D, reply["name"]) if ok else {}
+    judge("feature", "revolution_sketch", ok, reply, ok and abs(st["vol"] - ring) < 0.1, f"volume {st.get('vol')} (expected {round(ring, 2)})", f"volume {st.get('vol')}")
+    if ok:
+        s = await sketch(D, b, "XZ_Plane")
+        await T["add_sketch_rectangle"](sketch_name=s, x=8, y=4, width=4, height=2, doc_name=D)
+        await expect_volume("groove_sketch", "groove_sketch", D, reply["name"], ring - PI * (100 - 64) * 2, 0.1, sketch_name=s, axis="Base_Z")
+    close(D)
+
+    D = "BenchLoft"
+    b = await new_body(D)
+    s1 = await sketch(D, b)
+    await T["add_sketch_rectangle"](sketch_name=s1, x=-5, y=-5, width=10, height=10, doc_name=D)
+    s2 = await sketch(D, b, offset=10)
+    await T["add_sketch_circle"](sketch_name=s2, center_x=0, center_y=0, radius=4, doc_name=D)
+    ok, reply = await call("loft_sketches", sketch_names=[s1, s2], doc_name=D)
+    st = solid(D, reply["name"]) if ok else {}
+    judge("feature", "loft_sketches (offset sketch)", ok, reply, ok and st["valid"] and 500 < st["vol"] < 1000, f"volume {st.get('vol')}", f"volume {st.get('vol')}")
+    close(D)
+    D = "BenchLoftCut"
+    b = await new_body(D)
+    p = await plate(D, b, -15, -15, 30, 30, 20)
+    s1 = await sketch(D, b)
+    await T["add_sketch_rectangle"](sketch_name=s1, x=-5, y=-5, width=10, height=10, doc_name=D)
+    dp = (await T["create_datum_plane"](body_name=b, offset=10, doc_name=D))["name"]
+    s2 = await sketch(D, b, plane=dp)
+    await T["add_sketch_circle"](sketch_name=s2, center_x=0, center_y=0, radius=4, doc_name=D)
+    await expect_volume("subtractive_loft (datum sketch)", "subtractive_loft", D, p, None, 0, sketch_names=[s1, s2])
+    close(D)
+    for tool, on_solid in (("sweep_sketch", False), ("subtractive_pipe", True)):
+        D = "BenchSweep"
+        b = await new_body(D)
+        base = await plate(D, b, -10, -10, 20, 20, 30) if on_solid else None
+        prof = await sketch(D, b)
+        await T["add_sketch_circle"](sketch_name=prof, center_x=0, center_y=0, radius=2, doc_name=D)
+        spine = await sketch(D, b, "XZ_Plane")
+        await T["add_sketch_line"](sketch_name=spine, x1=0, y1=0, x2=0, y2=20, doc_name=D)
+        tube = PI * 4 * 20
+        if on_solid:
+            await expect_volume(tool, tool, D, base, 12000 - tube, 0.5, profile_sketch=prof, spine_sketch=spine)
+        else:
+            ok, reply = await call(tool, profile_sketch=prof, spine_sketch=spine, doc_name=D)
+            st = solid(D, reply["name"]) if ok else {}
+            judge("feature", tool, ok, reply, ok and abs(st["vol"] - tube) < 0.5, f"volume {st.get('vol')} (expected {round(tube, 2)})", f"volume {st.get('vol')}")
+        close(D)
+
+    D = "BenchDatum"
+    b = await new_body(D)
+    ok, reply = await call("create_datum_plane", body_name=b, offset=10, doc_name=D)
+    z = q(f"R = App.getDocument({D!r}).getObject({reply['name']!r}).Placement.Base.z") if ok else None
+    judge("feature", "create_datum_plane", ok, reply, ok and abs(z - 10) < 1e-6, "plane at z = 10", f"z = {z}")
+    for axis, want in (("X_Axis", [1, 0, 0]), ("Y_Axis", [0, 1, 0])):
+        ok, reply = await call("create_datum_line", body_name=b, base_axis=axis, doc_name=D)
+        d = q(f"R = [round(v, 6) for v in App.getDocument({D!r}).getObject({reply['name']!r}).Shape.Edges[0].Curve.Direction]") if ok else None
+        judge("feature", f"create_datum_line {axis}", ok, reply, ok and [abs(v) for v in d] == want, f"direction {d}", f"direction {d}")
+    ok, reply = await call("create_datum_point", body_name=b, position=[1, 2, 3], doc_name=D)
+    pt = q(f"_p = App.getDocument({D!r}).getObject({reply['name']!r}).Placement.Base; R = [_p.x, _p.y, _p.z]") if ok else None
+    judge("feature", "create_datum_point", ok, reply, ok and pt == [1, 2, 3], f"point {pt}", f"point {pt}")
+    p = await plate(D, b, 0, 0, 40, 20, 3)
+    s = await sketch(D, b)
+    before = sketch_state(D, s)["ext"]
+    ok, reply = await call("add_external_geometry", sketch_name=s, object_name=p, element="Edge1", doc_name=D)
+    after = sketch_state(D, s)["ext"]
+    judge("feature", "add_external_geometry", ok, reply, after == before + 1 and reply.get("external_geometry_count") == after,
+          f"external {before} -> {after}", f"external {before} -> {after}, reported {reply.get('external_geometry_count') if ok else None}")
+    close(D)
+
+
+# --------------------------------------------------------------------------- 4. spreadsheet
+
+async def bench_spreadsheet() -> None:
+    G, D = "sheet", "BenchSheet"
+    close(D)
+    q(f"App.newDocument({D!r}); R = True")
+    ok, reply = await call("spreadsheet_create", name="Params", doc_name=D)
+    kind = q(f"_o = App.getDocument({D!r}).getObject('Params'); R = _o.TypeId if _o else None")
+    judge(G, "spreadsheet_create", ok, reply, kind == "Spreadsheet::Sheet", "sheet created", f"type {kind}")
+    ok, reply = await call("spreadsheet_set_cell", spreadsheet_name="Params", cell="A1", value=12, doc_name=D)
+    v = q(f"App.getDocument({D!r}).recompute(); R = App.getDocument({D!r}).getObject('Params').get('A1')")
+    judge(G, "spreadsheet_set_cell", ok, reply, v == 12, "A1 = 12", f"A1 = {v}")
+    ok, reply = await call("spreadsheet_set_alias", spreadsheet_name="Params", cell="A1", alias="length", doc_name=D)
+    alias = q(f"R = App.getDocument({D!r}).getObject('Params').getAlias('A1')")
+    judge(G, "spreadsheet_set_alias", ok, reply, alias == "length", "alias length", f"alias {alias}")
+    ok, reply = await call("spreadsheet_get_cell", spreadsheet_name="Params", cell="A1", doc_name=D)
+    judge(G, "spreadsheet_get_cell", ok, reply, ok and "12" in json.dumps(reply) and reply.get("alias") == "length", "12, alias length", f"{reply}")
+    ok, reply = await call("spreadsheet_get_aliases", spreadsheet_name="Params", doc_name=D)
+    judge(G, "spreadsheet_get_aliases", ok, reply, ok and reply.get("aliases") == {"length": "A1"}, "length -> A1", f"{reply}")
+    await T["spreadsheet_set_cell"](spreadsheet_name="Params", cell="B2", value=3, doc_name=D)
+    ok, reply = await call("spreadsheet_get_cell_range", spreadsheet_name="Params", start_cell="A1", end_cell="B2", doc_name=D)
+    seen = json.dumps(reply) if ok else ""
+    judge(G, "spreadsheet_get_cell_range", ok, reply, "12" in seen and "3" in seen, "A1 and B2 read", seen[:100])
+    ok, reply = await call("spreadsheet_clear_cell", spreadsheet_name="Params", cell="B2", doc_name=D)
+    left = q(f"R = App.getDocument({D!r}).getObject('Params').getContents('B2')")
+    judge(G, "spreadsheet_clear_cell", ok, reply, left in ("", None), "B2 cleared", f"B2 = {left!r}")
+    q(f"App.getDocument({D!r}).addObject('Part::Box', 'Box'); App.getDocument({D!r}).recompute(); R = True")
+    ok, reply = await call("spreadsheet_bind_property", spreadsheet_name="Params", alias="length", target_object="Box", target_property="Length", doc_name=D)
+    box_length = q(f"App.getDocument({D!r}).recompute(); R = App.getDocument({D!r}).getObject('Box').Length.Value")
+    judge(G, "spreadsheet_bind_property", ok, reply, box_length == 12, "Box.Length = 12", f"Length = {box_length}")
+    csv_path = os.path.join(SHARED_DIR, "bench_sheet.csv")
+    ok, reply = await call("spreadsheet_export_csv", spreadsheet_name="Params", file_path=csv_path, doc_name=D)
+    content = open(csv_path, encoding="utf-8").read() if os.path.exists(csv_path) else ""
+    judge(G, "spreadsheet_export_csv", ok, reply, "12" in content, f"{len(content)} bytes", f"file: {content[:60]!r}")
+    await T["spreadsheet_create"](name="Import", doc_name=D)
+    with open(csv_path, "w", encoding="utf-8") as f:
+        f.write("7,8\n9,10\n")
+    ok, reply = await call("spreadsheet_import_csv", spreadsheet_name="Import", file_path=csv_path, doc_name=D)
+    values = q(f"_s = App.getDocument({D!r}).getObject('Import'); R = [_s.getContents(c) for c in ('A1', 'B1', 'A2', 'B2')]")
+    judge(G, "spreadsheet_import_csv", ok, reply, [str(x).lstrip("=") for x in values] == ["7", "8", "9", "10"], f"read {values}", f"read {values}")
+    os.remove(csv_path)
+    close(D)
+
+
+async def main() -> int:
+    for group in (bench_geometry, bench_constraints, bench_features, bench_spreadsheet):
+        try:
+            await group()
+        except Exception as e:  # noqa: BLE001
+            note(group.__name__, "(bench)", "BENCH_ERROR", repr(e)[:200])
+    q("R = [App.closeDocument(_d) for _d in list(App.listDocuments()) if _d.startswith('Bench')]")
+    totals = Counter(r[2] for r in RESULTS)
+    print(f"\nTOTAL: {dict(totals)} over {len(RESULTS)} cases")
+    out = os.environ.get("BENCH_RESULTS")
+    if out:
+        with open(out, "w", encoding="utf-8") as f:
+            json.dump(RESULTS, f, ensure_ascii=False, indent=1)
+    return 0 if totals.get("OK", 0) == len(RESULTS) else 1
+
+
+if __name__ == "__main__":
+    sys.exit(asyncio.run(main()))

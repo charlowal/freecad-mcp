@@ -2,6 +2,11 @@
 
 This module provides tools for the Spreadsheet workbench, enabling
 parametric design through cell values that can drive model dimensions.
+
+Vendored from spkane/freecad-addon-robust-mcp-server (MIT, see
+LICENSE-spkane) and adapted to run on this addon's execute_code.
+Changes for FreeCAD 1.1: aliases are read from the used cells, since
+they no longer appear among the sheet's properties.
 """
 
 from collections.abc import Awaitable, Callable
@@ -240,23 +245,11 @@ try:
 except Exception:
     content = None
 
-# Check for alias
-alias = None
+# Check for alias (FreeCAD 1.1 no longer lists aliases as properties)
 try:
-    # Get all aliases and check if this cell has one
-    aliases = sheet.getPropertyByName("cells").Content
-    # Parse XML to find alias - simplified approach
-    for prop_name in dir(sheet):
-        if not prop_name.startswith("_"):
-            try:
-                cell_prop = sheet.getCellFromAlias(prop_name)
-                if cell_prop == cell:
-                    alias = prop_name
-                    break
-            except Exception:
-                pass
+    alias = sheet.getAlias(cell)
 except Exception:
-    pass
+    alias = None
 
 _result_ = {{
     "cell": cell,
@@ -390,19 +383,12 @@ if sheet is None:
 
 aliases = {{}}
 
-# Get aliases by checking which properties are aliases
-# In FreeCAD, spreadsheet aliases become properties on the sheet object
-try:
-    # Method 1: Try getPropertyByName for each potential alias
-    for prop_name in sheet.PropertiesList:
-        try:
-            cell = sheet.getCellFromAlias(prop_name)
-            if cell:
-                aliases[prop_name] = cell
-        except Exception:
-            pass
-except Exception:
-    pass
+# FreeCAD 1.1 no longer lists aliases among the sheet's properties:
+# read the alias of every used cell instead.
+for cell in sheet.getUsedCells():
+    alias = sheet.getAlias(cell)
+    if alias:
+        aliases[alias] = cell
 
 _result_ = {{
     "spreadsheet": sheet.Name,

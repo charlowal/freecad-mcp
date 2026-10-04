@@ -5,10 +5,65 @@ parametric solid modeling operations like Pad, Pocket, Fillet, etc.
 
 Based on learnings from contextform/freecad-mcp which has the most
 comprehensive PartDesign coverage.
+
+Vendored from spkane/freecad-addon-robust-mcp-server (MIT, see
+LICENSE-spkane) and adapted to run on this addon's execute_code.
+Changes for FreeCAD 1.1: Pad/Revolution/Groove use Midplane (Symmetric
+was renamed), fillet/chamfer on all edges pass edge names, external
+geometry is counted from ExternalGeo, Angle constraints take degrees,
+datum lines attach with ObjectX, datum points find the origin by Role,
+draft without faces picks the faces parallel to the pull direction,
+pocket and hole can be reversed, and sketches attach to feature faces
+and datum planes with an optional normal offset.
 """
 
+import textwrap
 from collections.abc import Awaitable, Callable
 from typing import Any
+
+
+def _check_solid(feature: str, expect: str, hint: str, indent: int = 4) -> str:
+    """Return a snippet that rejects a feature which did not change the solid.
+
+    It runs inside a template's transaction, before commitTransaction, at
+    ``indent`` spaces. ``expect`` is "add" (volume must grow), "remove"
+    (must shrink) or "change". On failure it removes the feature, so the
+    body is left as it was, and raises with ``hint``; on success it leaves
+    ``_verification`` for the bridge to report.
+    """
+    snippet = f"""
+    _base = {feature}.BaseFeature
+    _before = _base.Shape.Volume if _base is not None and not _base.Shape.isNull() else 0.0
+    _shape = {feature}.Shape
+    _problem = None
+    if _shape.isNull() or "Invalid" in {feature}.State or not _shape.isValid():
+        _problem = "produced an invalid solid"
+    else:
+        _after = _shape.Volume
+        _tol = max(1e-9, 1e-9 * _before)
+        if {expect!r} == "add" and not _after > _before + _tol:
+            _problem = "added no material"
+        elif {expect!r} == "remove" and not _after < _before - _tol:
+            _problem = "removed no material"
+        elif {expect!r} == "change" and abs(_after - _before) <= _tol:
+            _problem = "did not change the solid"
+    if _problem:
+        _what = {feature}.TypeId.split("::")[-1]
+        _volumes = " (volume " + str(round(_before, 3)) + " mm3 before)"
+        # Read everything needed before the abort: it may delete the feature.
+        _fname = {feature}.Name
+        _bodies = [p for p in {feature}.InList if p.TypeId == "PartDesign::Body"]
+        doc.abortTransaction()
+        _left = doc.getObject(_fname)
+        if _left is not None:
+            for _parent in _bodies:
+                _parent.removeObject(_left)
+            doc.removeObject(_fname)
+        doc.recompute()
+        raise ValueError(_what + " " + _problem + _volumes + "; it was undone. " + {hint!r})
+    _verification = dict(feature={feature}.Name, valid=True, volume_before=round(_before, 6), volume_after=round(_after, 6))
+"""
+    return textwrap.indent(textwrap.dedent(snippet), " " * indent)
 
 
 def register_partdesign_tools(
@@ -42,12 +97,31 @@ def register_partdesign_tools(
                 - type_id: Object type
         """
         bridge = await get_bridge()
-        obj = await bridge.create_object("PartDesign::Body", name, None, doc_name)
-        return {
-            "name": obj.name,
-            "label": obj.label,
-            "type_id": obj.type_id,
-        }
+
+        code = f"""
+doc = FreeCAD.ActiveDocument if {doc_name!r} is None else FreeCAD.getDocument({doc_name!r})
+if doc is None:
+    raise ValueError("No active document")
+
+doc.openTransaction("Create Body")
+try:
+    body = doc.addObject("PartDesign::Body", {name!r} or "Body")
+    doc.recompute()
+    doc.commitTransaction()
+except Exception:
+    doc.abortTransaction()
+    raise
+
+_result_ = {{
+    "name": body.Name,
+    "label": body.Label,
+    "type_id": body.TypeId,
+}}
+"""
+        result = await bridge.execute_python(code)
+        if result.success:
+            return result.result
+        raise ValueError(result.error_traceback or "Create body failed")
 
     @mcp.tool()
     async def create_sketch(
@@ -55,6 +129,7 @@ def register_partdesign_tools(
         plane: str = "XY_Plane",
         name: str | None = None,
         doc_name: str | None = None,
+        offset: float = 0.0,
     ) -> dict[str, Any]:
         """Create a new Sketch attached to a plane or body.
 
@@ -65,8 +140,13 @@ def register_partdesign_tools(
                 - "XZ_Plane" - Front vertical plane
                 - "YZ_Plane" - Side vertical plane
                 - Face name like "Face1" to attach to body face
+                - "Feature:FaceN", e.g. "Pad:Face6", to attach to a face of a
+                  feature (find faces and their normals with get_object)
+                - The name of a datum plane in the body
             name: Sketch name. Auto-generated if None.
             doc_name: Target document. Uses active document if None.
+            offset: Distance to shift the sketch along its normal, e.g. to
+                sketch 10 mm above XY_Plane for a loft. Defaults to 0.
 
         Returns:
             Dictionary with created sketch information:
@@ -99,19 +179,29 @@ try:
         # Check which property exists and use the appropriate one
         plane = {plane!r}
         if plane in ["XY_Plane", "XZ_Plane", "YZ_Plane"]:
-            plane_obj = body.Origin.getObject(plane)
-            if hasattr(sketch, "AttachmentSupport"):
-                sketch.AttachmentSupport = [(plane_obj, "")]
-            else:
-                sketch.Support = (plane_obj, [""])
-            sketch.MapMode = "FlatFace"
+            support = (body.Origin.getObject(plane), "")
         elif plane.startswith("Face"):
-            # Attach to face
-            if hasattr(sketch, "AttachmentSupport"):
-                sketch.AttachmentSupport = [(body, plane)]
-            else:
-                sketch.Support = (body, [plane])
-            sketch.MapMode = "FlatFace"
+            # Attach to a face of the body's tip
+            support = (body, plane)
+        elif ":" in plane:
+            # Attach to a face of a named feature, e.g. "Pad:Face6"
+            feature_name, face_name = plane.split(":", 1)
+            feature = doc.getObject(feature_name)
+            if feature is None:
+                raise ValueError("Feature not found: " + feature_name)
+            support = (feature, face_name)
+        else:
+            # Attach to a datum plane
+            datum = doc.getObject(plane)
+            if datum is None or datum.TypeId != "PartDesign::Plane":
+                raise ValueError("Unknown plane: " + plane + " (use XY_Plane, XZ_Plane, YZ_Plane, Feature:FaceN or a datum plane name)")
+            support = (datum, "")
+        if hasattr(sketch, "AttachmentSupport"):
+            sketch.AttachmentSupport = [support]
+        else:
+            sketch.Support = (support[0], [support[1]])
+        sketch.MapMode = "FlatFace"
+        sketch.AttachmentOffset = FreeCAD.Placement(FreeCAD.Vector(0, 0, {offset}), FreeCAD.Rotation())
     else:
         # Standalone sketch
         sketch = doc.addObject("Sketcher::SketchObject", sketch_name)
@@ -125,16 +215,21 @@ try:
             sketch.Placement = FreeCAD.Placement(FreeCAD.Vector(0,0,0), FreeCAD.Rotation(FreeCAD.Vector(0,1,0), 90))
 
     doc.recompute()
+    if "Invalid" in sketch.State or "Error" in sketch.State:
+        raise ValueError("Sketch could not be attached to " + {plane!r} + " (a face must be planar)")
     doc.commitTransaction()
 except Exception:
     doc.abortTransaction()
     raise
 
+_normal = sketch.Placement.Rotation.multVec(FreeCAD.Vector(0, 0, 1))
 _result_ = {{
     "name": sketch.Name,
     "label": sketch.Label,
     "type_id": sketch.TypeId,
     "support": str(sketch.AttachmentSupport) if hasattr(sketch, "AttachmentSupport") else (str(sketch.Support) if hasattr(sketch, "Support") else None),
+    "origin": [round(sketch.Placement.Base.x, 6), round(sketch.Placement.Base.y, 6), round(sketch.Placement.Base.z, 6)],
+    "normal": [round(_normal.x, 6), round(_normal.y, 6), round(_normal.z, 6)],
 }}
 """
         result = await bridge.execute_python(code)
@@ -315,10 +410,11 @@ try:
     pad = body.newObject("PartDesign::Pad", pad_name)
     pad.Profile = sketch
     pad.Length = {length}
-    pad.Symmetric = {symmetric}
+    setattr(pad, "Midplane" if hasattr(pad, "Midplane") else "Symmetric", {symmetric})
     pad.Reversed = {reversed}
 
     doc.recompute()
+{_check_solid('pad', 'add', 'Check that the sketch is a closed profile and the length is not zero.')}
     doc.commitTransaction()
 except Exception:
     doc.abortTransaction()
@@ -342,8 +438,13 @@ _result_ = {{
         type: str = "Length",
         name: str | None = None,
         doc_name: str | None = None,
+        reversed: bool = False,
     ) -> dict[str, Any]:
         """Create a Pocket (cut extrusion) from a sketch.
+
+        A pocket cuts against the sketch normal. From a base plane under a
+        pad that grows upward it cuts into empty space; the tool then undoes
+        it and says so. Retry with reversed=True, or sketch on the face to cut.
 
         Args:
             sketch_name: Name of the sketch to pocket.
@@ -351,6 +452,7 @@ _result_ = {{
             type: Pocket type: "Length", "ThroughAll", "UpToFirst", "UpToFace".
             name: Pocket feature name. Auto-generated if None.
             doc_name: Document containing the sketch. Uses active document if None.
+            reversed: Cut along the sketch normal instead of against it.
 
         Returns:
             Dictionary with created pocket information:
@@ -385,8 +487,10 @@ try:
     pocket.Profile = sketch
     pocket.Length = {length}
     pocket.Type = {type!r}
+    pocket.Reversed = {reversed}
 
     doc.recompute()
+{_check_solid('pocket', 'remove', 'The cut went into empty space: retry with reversed=True, or attach the sketch to the face to cut (plane=Feature:FaceN).')}
     doc.commitTransaction()
 except Exception:
     doc.abortTransaction()
@@ -457,8 +561,10 @@ try:
     if body:
         # PartDesign Fillet
         fillet = body.newObject("PartDesign::Fillet", fillet_name)
-        fillet.Base = (obj, selected_edges if selected_edges else obj.Shape.Edges)
+        fillet.Base = (obj, selected_edges if selected_edges else ["Edge" + str(i + 1) for i in range(len(obj.Shape.Edges))])
         fillet.Radius = {radius}
+        doc.recompute()
+{_check_solid('fillet', 'change', 'Check the edge names with get_object and that the radius fits the adjacent faces.', indent=8)}
     else:
         # Part Fillet
         fillet = doc.addObject("Part::Fillet", fillet_name)
@@ -542,8 +648,10 @@ try:
     if body:
         # PartDesign Chamfer
         chamfer = body.newObject("PartDesign::Chamfer", chamfer_name)
-        chamfer.Base = (obj, selected_edges if selected_edges else obj.Shape.Edges)
+        chamfer.Base = (obj, selected_edges if selected_edges else ["Edge" + str(i + 1) for i in range(len(obj.Shape.Edges))])
         chamfer.Size = {size}
+        doc.recompute()
+{_check_solid('chamfer', 'change', 'Check the edge names with get_object and that the size fits the adjacent faces.', indent=8)}
     else:
         # Part Chamfer
         chamfer = doc.addObject("Part::Chamfer", chamfer_name)
@@ -633,7 +741,7 @@ try:
     rev = body.newObject("PartDesign::Revolution", rev_name)
     rev.Profile = sketch
     rev.Angle = {angle}
-    rev.Symmetric = {symmetric}
+    setattr(rev, "Midplane" if hasattr(rev, "Midplane") else "Symmetric", {symmetric})
     rev.Reversed = {reversed}
 
     # Set axis reference
@@ -648,6 +756,7 @@ try:
             rev.ReferenceAxis = (sketch, ["H_Axis"])
 
     doc.recompute()
+{_check_solid('rev', 'add', 'Check the axis: the profile must lie on one side of it.')}
     doc.commitTransaction()
 except Exception:
     doc.abortTransaction()
@@ -724,7 +833,7 @@ try:
     groove = body.newObject("PartDesign::Groove", groove_name)
     groove.Profile = sketch
     groove.Angle = {angle}
-    groove.Symmetric = {symmetric}
+    setattr(groove, "Midplane" if hasattr(groove, "Midplane") else "Symmetric", {symmetric})
     groove.Reversed = {reversed}
 
     # Set axis reference
@@ -739,6 +848,7 @@ try:
             groove.ReferenceAxis = (sketch, ["H_Axis"])
 
     doc.recompute()
+{_check_solid('groove', 'remove', 'Check the axis and that the profile overlaps the solid.')}
     doc.commitTransaction()
 except Exception:
     doc.abortTransaction()
@@ -766,6 +876,7 @@ _result_ = {{
         thread_size: str = "M6",
         name: str | None = None,
         doc_name: str | None = None,
+        reversed: bool = False,
     ) -> dict[str, Any]:
         """Create a Hole feature from a sketch containing point(s).
 
@@ -785,6 +896,8 @@ _result_ = {{
             thread_size: Thread size (e.g., "M6", "M8", "#10", "1/4").
             name: Hole feature name. Auto-generated if None.
             doc_name: Document containing the sketch. Uses active document if None.
+            reversed: Drill along the sketch normal instead of against it, for
+                a sketch under the solid (the tool says when this is needed).
 
         Returns:
             Dictionary with created hole information:
@@ -818,6 +931,7 @@ try:
     hole = body.newObject("PartDesign::Hole", hole_name)
     hole.Profile = sketch
     hole.Depth = {depth}
+    hole.Reversed = {reversed}
 
     # Set hole type
     hole_type = {hole_type!r}
@@ -838,6 +952,7 @@ try:
         hole.Diameter = {diameter}
 
     doc.recompute()
+{_check_solid('hole', 'remove', 'The hole went into empty space: retry with reversed=True, or sketch its centers on the face to drill (plane=Feature:FaceN).')}
     doc.commitTransaction()
 except Exception:
     doc.abortTransaction()
@@ -914,6 +1029,7 @@ try:
     pattern.Direction = (body.Origin.getObject(f"{{dir_name}}_Axis"), [""])
 
     doc.recompute()
+{_check_solid('pattern', 'change', 'Check that the copies land on the solid (direction, length, occurrences).')}
     doc.commitTransaction()
 except Exception:
     doc.abortTransaction()
@@ -990,6 +1106,7 @@ try:
     pattern.Axis = (body.Origin.getObject(f"{{axis_name}}_Axis"), [""])
 
     doc.recompute()
+{_check_solid('pattern', 'change', 'Check that the copies land on the solid (axis, angle, occurrences).')}
     doc.commitTransaction()
 except Exception:
     doc.abortTransaction()
@@ -1068,6 +1185,7 @@ try:
     mirror.MirrorPlane = (body.Origin.getObject({plane_ref!r}), [""])
 
     doc.recompute()
+{_check_solid('mirror', 'change', 'Check that the mirror plane puts the copy on the solid.')}
     doc.commitTransaction()
 except Exception:
     doc.abortTransaction()
@@ -1326,6 +1444,7 @@ try:
     loft.Closed = {closed}
 
     doc.recompute()
+{_check_solid('loft', 'add', 'Check that the sections are closed profiles on different planes (create_sketch offset=).')}
     doc.commitTransaction()
 except Exception:
     doc.abortTransaction()
@@ -1415,6 +1534,7 @@ try:
     sweep.Transition = {transition_map[transition]}
 
     doc.recompute()
+{_check_solid('sweep', 'add', 'Check that the profile is closed and the spine starts on its plane.')}
     doc.commitTransaction()
 except Exception:
     doc.abortTransaction()
@@ -1552,10 +1672,17 @@ try:
     # Set reference axis
     axis = {base_axis!r}
     axis_obj = body.Origin.getObject(axis)
+    if axis_obj is None:
+        raise ValueError("Unknown axis: " + axis + " (use X_Axis, Y_Axis or Z_Axis)")
     datum.AttachmentSupport = [(axis_obj, "")]
-    datum.MapMode = "ObjectXY"
+    # Origin axes run along their own X; ObjectXY is not implemented for lines.
+    datum.MapMode = "ObjectX"
 
     doc.recompute()
+    _dir = datum.Shape.Edges[0].Curve.Direction
+    _want = axis_obj.Shape.Edges[0].Curve.Direction
+    if abs(abs(_dir.dot(_want)) - 1) > 1e-9:
+        raise ValueError("Datum line did not follow " + axis + ": direction " + str(_dir))
     doc.commitTransaction()
 
     _result_ = {{
@@ -1614,8 +1741,14 @@ try:
     datum_name = {name!r} or "DatumPoint"
     datum = body.newObject("PartDesign::Point", datum_name)
 
-    # Set offset from origin
-    origin_point = body.Origin.getObject("Point")
+    # Set offset from origin; the origin point is found by its Role, its
+    # Name varies (Origin001, ...)
+    origin_point = None
+    for _feature in body.Origin.OriginFeatures:
+        if getattr(_feature, "Role", "") == "Origin":
+            origin_point = _feature
+    if origin_point is None:
+        raise ValueError("Body has no origin point to attach the datum to")
     datum.AttachmentSupport = [(origin_point, "")]
     datum.MapMode = "ObjectOrigin"
     datum.AttachmentOffset = FreeCAD.Placement(
@@ -1624,6 +1757,9 @@ try:
     )
 
     doc.recompute()
+    _at = datum.Placement.Base  # in body coordinates, like the requested position
+    if (_at - FreeCAD.Vector({pos[0]}, {pos[1]}, {pos[2]})).Length > 1e-9:
+        raise ValueError("Datum point landed at " + str(_at) + " instead of the requested position")
     doc.commitTransaction()
 
     _result_ = {{
@@ -1708,16 +1844,25 @@ try:
     draft = body.newObject("PartDesign::Draft", draft_name)
 
     draft.Angle = {angle}
-    draft.Base = (obj, selected_faces if selected_faces else [])
 
     # Set neutral plane
     plane_name = {plane!r}
     plane_map = {{"XY": "XY_Plane", "XZ": "XZ_Plane", "YZ": "YZ_Plane"}}
+    pull = FreeCAD.Vector(0, 0, 1)
     if plane_name in plane_map:
         plane_obj = body.Origin.getObject(plane_map[plane_name])
         draft.NeutralPlane = (plane_obj, "")
+        pull = plane_obj.Placement.Rotation.multVec(FreeCAD.Vector(0, 0, 1))
+
+    # Without faces, draft every face parallel to the pull direction
+    if not selected_faces:
+        selected_faces = ["Face" + str(i + 1) for i, f in enumerate(obj.Shape.Faces) if abs(f.normalAt(0, 0).dot(pull)) < 1e-6]
+        if not selected_faces:
+            raise ValueError("No face is parallel to the pull direction of the " + plane_name + " neutral plane; pass faces=")
+    draft.Base = (obj, selected_faces)
 
     doc.recompute()
+{_check_solid('draft', 'change', 'Check the faces and the neutral plane.')}
     doc.commitTransaction()
 
     _result_ = {{
@@ -1794,6 +1939,7 @@ try:
     thick.Join = 0  # Arc join
 
     doc.recompute()
+{_check_solid('thick', 'change', 'Check the face to remove and that the thickness fits the part.')}
     doc.commitTransaction()
 
     _result_ = {{
@@ -1876,6 +2022,7 @@ try:
     loft.Closed = {closed}
 
     doc.recompute()
+{_check_solid('loft', 'remove', 'Check that the sections overlap the solid and lie on different planes.')}
     doc.commitTransaction()
 
     _result_ = {{
@@ -1963,6 +2110,7 @@ try:
     pipe.Transition = {transition_map[transition]}
 
     doc.recompute()
+{_check_solid('pipe', 'remove', 'Check that the profile and spine pass through the solid.')}
     doc.commitTransaction()
 
     _result_ = {{
@@ -2323,7 +2471,8 @@ except Exception:
                     Use -1 for edge itself.
             geometry2: Index of second geometry element. Use -2 for external.
             point2: Point index on second geometry.
-            value: Value for dimensional constraints (distance, angle, etc.).
+            value: Value for dimensional constraints (distance, radius, angle, etc.).
+                Angles are in degrees.
             doc_name: Document containing the sketch. Uses active document if None.
 
         Returns:
@@ -2334,6 +2483,7 @@ except Exception:
         bridge = await get_bridge()
 
         code = f"""
+import math
 import Sketcher
 
 doc = FreeCAD.ActiveDocument if {doc_name!r} is None else FreeCAD.getDocument({doc_name!r})
@@ -2381,10 +2531,11 @@ try:
     elif ctype == "Angle":
         if value is None:
             raise ValueError("Angle constraint requires a value")
+        # The tool takes degrees; Sketcher stores angles in radians.
         if g2 >= 0:
-            constraint = Sketcher.Constraint(ctype, g1, g2, value)
+            constraint = Sketcher.Constraint(ctype, g1, g2, math.radians(value))
         else:
-            constraint = Sketcher.Constraint(ctype, g1, value)
+            constraint = Sketcher.Constraint(ctype, g1, math.radians(value))
     else:
         raise ValueError(f"Unknown constraint type: {{ctype}}")
 
@@ -2789,7 +2940,7 @@ try:
 
     _result_ = {{
         "success": True,
-        "external_geometry_count": sketch.ExternalGeometryCount,
+        "external_geometry_count": len(sketch.ExternalGeo) - 2,
     }}
 except Exception:
     doc.abortTransaction()
@@ -2925,7 +3076,7 @@ _result_ = {{
     "label": sketch.Label,
     "geometry_count": sketch.GeometryCount,
     "constraint_count": sketch.ConstraintCount,
-    "external_geometry_count": sketch.ExternalGeometryCount,
+    "external_geometry_count": len(sketch.ExternalGeo) - 2,
     "fully_constrained": sketch.FullyConstrained if hasattr(sketch, "FullyConstrained") else None,
     "dof": sketch.solve() if hasattr(sketch, "solve") else None,
 }}

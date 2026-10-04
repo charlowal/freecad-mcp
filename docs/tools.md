@@ -27,6 +27,36 @@
 See [code execution](execution.md) for execution modes, shared script state,
 background job tracking, and timeout handling.
 
+## Parametric modelling
+
+59 more tools build parametric parts in a PartDesign body. They come from
+[spkane/freecad-addon-robust-mcp-server](https://github.com/spkane/freecad-addon-robust-mcp-server)
+(MIT, see `src/freecad_mcp/modelisation/LICENSE-spkane`), fixed for FreeCAD 1.1,
+and run on this addon's `execute_code`; nothing changes in the addon.
+
+| Group | Tools |
+| --- | --- |
+| Body and sketch | `create_partdesign_body`, `create_sketch`, `get_sketch_info`, `toggle_construction`, `delete_sketch_geometry`, `add_external_geometry` |
+| Sketch geometry | `add_sketch_line`, `add_sketch_arc`, `add_sketch_circle`, `add_sketch_ellipse`, `add_sketch_point`, `add_sketch_polygon`, `add_sketch_slot`, `add_sketch_bspline`, `add_sketch_rectangle` |
+| Constraints | `constrain_horizontal`, `constrain_vertical`, `constrain_coincident`, `constrain_parallel`, `constrain_perpendicular`, `constrain_tangent`, `constrain_equal`, `constrain_distance`, `constrain_distance_x`, `constrain_distance_y`, `constrain_radius`, `constrain_angle` (degrees), `constrain_fix`, `add_sketch_constraint`, `delete_sketch_constraint` |
+| Features | `pad_sketch`, `pocket_sketch`, `revolution_sketch`, `groove_sketch`, `create_hole`, `fillet_edges`, `chamfer_edges`, `draft_feature`, `thickness_feature`, `linear_pattern`, `polar_pattern`, `mirrored_feature`, `loft_sketches`, `sweep_sketch`, `subtractive_loft`, `subtractive_pipe` |
+| References | `create_datum_plane`, `create_datum_line`, `create_datum_point` |
+| Spreadsheet | `spreadsheet_create`, `spreadsheet_set_cell`, `spreadsheet_get_cell`, `spreadsheet_set_alias`, `spreadsheet_get_aliases`, `spreadsheet_clear_cell`, `spreadsheet_get_cell_range`, `spreadsheet_bind_property`, `spreadsheet_import_csv`, `spreadsheet_export_csv` |
+
+`create_sketch` attaches to `XY_Plane`, `XZ_Plane` or `YZ_Plane`, to a feature
+face given as `"Pad:Face6"`, or to a datum plane, with an optional `offset`
+along the sketch normal.
+
+Every feature tool checks the solid before committing: an additive feature
+must add material, a subtractive one remove it, and a dress-up or pattern
+change it, with a valid result. Otherwise the feature is undone, the body is
+left as it was, and the error says what to change; a pocket that cuts into
+empty space, for instance, asks for `reversed=True`. A successful reply carries
+`verification` with `volume_before` and `volume_after`.
+
+`tests/integration/bench_modelling.py` runs every tool against a live FreeCAD
+and judges each by a measurement read from FreeCAD, not by the tool's reply.
+
 ## Screenshot options
 
 The following tools return optional screenshots: `create_object`, `edit_object`,

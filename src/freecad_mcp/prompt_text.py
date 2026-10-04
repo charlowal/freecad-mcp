@@ -19,9 +19,18 @@ When creating content in FreeCAD, always follow these steps:
 
 5. After editing an object, always verify that the set properties have been correctly applied by using get_object().
 
-6. If detailed customization or specialized operations are necessary, use execute_code() to run custom Python scripts.
+6. For a parametric part, build it in a PartDesign body rather than from primitives:
+   create_partdesign_body(), create_sketch() (on a base plane, a datum plane or
+   "Feature:FaceN"), add_sketch_*() geometry, constrain_*() constraints, then
+   pad_sketch(), pocket_sketch(), create_hole(), fillet_edges() and the other
+   feature tools. Drive dimensions from a spreadsheet with spreadsheet_set_alias()
+   and spreadsheet_bind_property(). Each feature tool reports volume_before and
+   volume_after, and undoes a feature that leaves the solid unchanged; read its
+   error, which says what to change (for instance reversed=True for a pocket).
 
-7. Manage screenshot feedback to save tokens. Tools that modify or inspect the
+7. If detailed customization or specialized operations are necessary, use execute_code() to run custom Python scripts.
+
+8. Manage screenshot feedback to save tokens. Tools that modify or inspect the
    model accept optional `include_screenshot` and `view_name` parameters:
    - Pass include_screenshot=False when the image would not be informative:
      analytical or computational scripts whose result is printed output,
