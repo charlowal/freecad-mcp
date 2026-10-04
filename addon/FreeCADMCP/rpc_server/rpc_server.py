@@ -397,12 +397,14 @@ class FreeCADRPC:
                 "success": True,
                 "message": "Python code executed successfully.\nOutput: " + output_buffer.getvalue(),
             }
-        # Log the offending code (truncated) to make errors traceable
-        code_preview = code if len(code) <= 800 else code[:800] + "\n...(truncated)"
-        FreeCAD.Console.PrintError(
-            f"Error executing Python code: {res}\n"
-            f"--- code ---\n{code_preview}\n--- end ---\n"
-        )
+        # Log the offending code (truncated) to make errors traceable; a tool's
+        # deliberate refusal is already logged on one line by the dispatcher.
+        if not str(res).startswith("ToolRefusal:"):
+            code_preview = code if len(code) <= 800 else code[:800] + "\n...(truncated)"
+            FreeCAD.Console.PrintError(
+                f"Error executing Python code: {res}\n"
+                f"--- code ---\n{code_preview}\n--- end ---\n"
+            )
         return _err(res)
 
     def get_objects(self, doc_name: str) -> list[dict[str, Any]]:

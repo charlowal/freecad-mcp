@@ -30,12 +30,24 @@ class ExecutionResult:
 
 
 def wrap(code: str) -> str:
-    """Surround a tool script so it reports ``_result_`` and any verification."""
+    """Surround a tool script so it reports ``_result_`` and any verification.
+
+    The script runs in a nested exec, so its own lines stay as written. The
+    ValueError and FileNotFoundError a tool raises to turn its input down
+    (with a hint for the client) become ToolRefusal, which the addon logs on
+    one line instead of a traceback and the whole script.
+    """
     return (
+        "class ToolRefusal(Exception):\n"
+        "    pass\n"
         "_result_ = None\n"
         "_verification = None\n"
-        + code
-        + "\nimport json as _json\n"
+        f"_tool_code = {code!r}\n"
+        "try:\n"
+        "    exec(compile(_tool_code, '<freecad-mcp tool>', 'exec'), globals())\n"
+        "except (ValueError, FileNotFoundError) as _refusal:\n"
+        "    raise ToolRefusal(str(_refusal)) from None\n"
+        "import json as _json\n"
         "if isinstance(_result_, dict) and _verification is not None:\n"
         "    _result_['verification'] = _verification\n"
         f"{RESULT_VARIABLE} = _json.dumps(_result_, default=str)\n"

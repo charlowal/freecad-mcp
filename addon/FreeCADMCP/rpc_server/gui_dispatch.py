@@ -296,10 +296,15 @@ def dispatch_to_gui(
             try:
                 res = task()
             except Exception as e:
-                FreeCAD.Console.PrintError(
-                    f"MCP RPC: GUI task raised {type(e).__name__}: {e}\n"
-                    f"{traceback.format_exc()}"
-                )
+                if type(e).__name__ == "ToolRefusal":
+                    # A modelling tool turned its input down with a hint for
+                    # the client: one line, not a traceback.
+                    FreeCAD.Console.PrintWarning(f"MCP tool refused: {e}\n")
+                else:
+                    FreeCAD.Console.PrintError(
+                        f"MCP RPC: GUI task raised {type(e).__name__}: {e}\n"
+                        f"{traceback.format_exc()}"
+                    )
                 res = f"{type(e).__name__}: {e}"
         finally:
             # Publish completion atomically with clearing health, so a deadline

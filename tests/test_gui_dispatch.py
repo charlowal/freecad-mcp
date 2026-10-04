@@ -65,7 +65,7 @@ def load_gui_dispatch() -> Iterator[types.ModuleType]:
     saved = {name: sys.modules.get(name, missing) for name in module_names}
 
     freecad = types.ModuleType("FreeCAD")
-    freecad.Console = types.SimpleNamespace(PrintError=lambda _message: None)
+    freecad.Console = types.SimpleNamespace(PrintError=lambda _message: None, PrintWarning=lambda _message: None)
 
     status_bar = FakeStatusBar()
     freecad_gui = types.ModuleType("FreeCADGui")
@@ -132,6 +132,33 @@ class ThreadedWaker:
     def join(self) -> None:
         for thread in self.threads:
             thread.join(timeout=1.0)
+
+
+def test_a_tool_refusal_is_logged_on_one_line_and_other_errors_in_full() -> None:
+    with load_gui_dispatch() as gui_dispatch:
+        waker = ThreadedWaker(gui_dispatch)
+        gui_dispatch._waker = waker
+        logged: list[tuple[str, str]] = []
+        gui_dispatch.FreeCAD.Console.PrintError = lambda m: logged.append(("error", m))
+        gui_dispatch.FreeCAD.Console.PrintWarning = lambda m: logged.append(("warning", m))
+
+        class ToolRefusal(Exception):
+            pass
+
+        def refuse() -> None:
+            raise ToolRefusal("Pocket removed no material; retry with reversed=True")
+
+        def crash() -> None:
+            raise RuntimeError("boom")
+
+        refused = gui_dispatch.dispatch_to_gui(refuse, timeout=1.0, operation_name="execute_code")
+        crashed = gui_dispatch.dispatch_to_gui(crash, timeout=1.0, operation_name="execute_code")
+        waker.join()
+
+        assert refused.startswith("ToolRefusal: Pocket removed no material")
+        assert crashed.startswith("RuntimeError: boom")
+        assert logged[0] == ("warning", "MCP tool refused: Pocket removed no material; retry with reversed=True\n")
+        assert logged[1][0] == "error" and "Traceback" in logged[1][1]
 
 
 def test_running_timeout_blocks_followups_until_task_finishes() -> None:
