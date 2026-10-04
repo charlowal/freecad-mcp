@@ -562,6 +562,33 @@ R = "Face" + str(min(range(len(_sh.Faces)), key=lambda i: _sh.Faces[i].CenterOfM
     sk_name = q(f"R = App.getDocument({D!r}).getObject({pocket!r}).Profile[0].Name")
     ok, reply = await call("export_dxf", file_path=tilde("bench_sketch.dxf"), object_names=[sk_name], doc_name=D)
     judge(G, "export_dxf (sketch)", ok, reply, ok and reply["entities"].get("CIRCLE") == 1, f"entities {reply.get('entities') if ok else None}", f"{reply}")
+    # a plate whose outline is cut in pieces, as an unfolder leaves it at the
+    # bend lines: long sides in 3 lines, a rounded corner in 2 arcs, a hole in
+    # 2 half circles (12 edges); the DXF must hold one entity per side, arc and
+    # hole (6 edges)
+    # (its own document, so the undo cases below still see the pocket last)
+    split = "BenchSplit"
+    close(split)
+    area = q(f"""import Part, math
+_d = App.newDocument({split!r})
+_v = App.Vector
+_c = Part.Circle(_v(35, 15, 0), _v(0, 0, 1), 5)
+_outer = Part.Wire([Part.LineSegment(_v(0, 0, 0), _v(10, 0, 0)).toShape(), Part.LineSegment(_v(10, 0, 0), _v(25, 0, 0)).toShape(),
+                    Part.LineSegment(_v(25, 0, 0), _v(40, 0, 0)).toShape(), Part.LineSegment(_v(40, 0, 0), _v(40, 15, 0)).toShape(),
+                    Part.Edge(_c, 0, math.pi / 4), Part.Edge(_c, math.pi / 4, math.pi / 2),
+                    Part.LineSegment(_v(35, 20, 0), _v(25, 20, 0)).toShape(), Part.LineSegment(_v(25, 20, 0), _v(10, 20, 0)).toShape(),
+                    Part.LineSegment(_v(10, 20, 0), _v(0, 20, 0)).toShape(), Part.LineSegment(_v(0, 20, 0), _v(0, 0, 0)).toShape()])
+_h = Part.Circle(_v(15, 10, 0), _v(0, 0, 1), 4)
+_hole = Part.Wire([Part.Edge(_h, 0, math.pi), Part.Edge(_h, math.pi, 2 * math.pi)])
+_o = _d.addObject("Part::Feature", "SplitPlate"); _o.Shape = Part.makeFace([_outer, _hole], "Part::FaceMakerBullseye")
+_d.recompute(); R = round(_o.Shape.Area, 6)""")
+    ok, reply = await call("export_dxf", file_path=tilde("bench_split.dxf"), face="SplitPlate:Face1", doc_name=split)
+    flat = reply.get("flat") if ok else None
+    judge(G, "export_dxf joins split edges", ok, reply,
+          reply["entities"] == {"LINE": 4, "ARC": 1, "CIRCLE": 1} and flat["joined_edges"] == 6 and abs(flat["area"] - area) < 1e-6 and flat["holes"] == 1,
+          f"entities {reply.get('entities') if ok else None}, {flat and flat['joined_edges']} edges joined, area kept",
+          f"entities {reply.get('entities') if ok else None}, flat {flat}, area before {area}")
+    close(split)
 
     # undo / redo on the pocket
     before = body_state(D, b)["vol"]
@@ -606,7 +633,7 @@ R = "Face" + str(min(range(len(_sh.Faces)), key=lambda i: _sh.Faces[i].CenterOfM
     ok, reply = await call("import_step", file_path=tilde("missing.step"), doc_name="BenchImport")
     judge(G, "import of a missing file refused", not ok, reply, "not found" in str(reply), "refused", str(reply))
     close("BenchImport")
-    for name in ("bench.step", "bench_pad.step", "bench.igs", "bench.stl", "bench.3mf", "bench.obj", "bench.dxf", "bench_side.dxf", "bench_sketch.dxf", "bench_doc.FCStd"):
+    for name in ("bench.step", "bench_pad.step", "bench.igs", "bench.stl", "bench.3mf", "bench.obj", "bench.dxf", "bench_side.dxf", "bench_sketch.dxf", "bench_split.dxf", "bench_doc.FCStd"):
         if os.path.exists(real(name)):
             os.remove(real(name))
     for leftover in os.listdir(SHARED_DIR):
@@ -717,6 +744,13 @@ _d.recompute(); R = True""")
     judge(G, "sheetmetal_unfold ansi", ok, reply, ok and abs(size[1] - ansi) < 1e-3 and abs(size[0] - 25) < 1e-6 and reply["bends"] == 1 and abs(reply["thickness"] - 2) < 1e-6,
           f"flat {size}, expected {round(ansi, 3)} x 25", f"{reply}")
     unfold = reply if ok else None
+    if unfold:
+        # one sketch per layer, and no text (lines and arcs) among the cut lines
+        layers = unfold["sketches"]
+        kinds = q(f"_d = App.getDocument({D!r}); R = {{k: sorted(set(type(g).__name__ for g in _d.getObject(n).Geometry)) for k, n in {layers!r}.items()}}")
+        judge(G, "sheetmetal_unfold sketch layers", True, unfold,
+              {"outline", "bend_lines"} <= set(layers) and kinds["outline"] == ["LineSegment"] and kinds["bend_lines"] == ["LineSegment"],
+              f"layers {kinds}", f"layers {kinds}")
     din = 26 + 16 + PI / 2 * (2 + 0.4 * 2 / 2)
     ok, reply = await call("sheetmetal_unfold", object_name="Bracket", k_factor_standard="din", generate_sketches=False, doc_name=D)
     size = sorted(reply["flat_size"]) if ok else None
@@ -730,10 +764,10 @@ _d.recompute(); R = True""")
         flat = reply.get("flat") if ok else None
         judge(G, "export_dxf flat pattern", ok, reply, ok and reply["entities"] == {"LINE": 4} and abs(max(flat["width"], flat["height"]) - ansi) < 1e-3,
               f"entities {reply.get('entities') if ok else None}, flat {flat}", f"{reply}")
-        ok, reply = await call("export_dxf", file_path=SHARED_TILDE + "/bench_bends.dxf", object_names=unfold["sketches"], doc_name=D)
-        lines = reply["entities"].get("LINE", 0) if ok else 0
-        judge(G, "export_dxf flat pattern with bend lines", ok, reply, ok and lines >= 5,
-              f"entities {reply.get('entities') if ok else None} (outline 4 + bend lines)", f"{reply}")
+        ok, reply = await call("export_dxf", file_path=SHARED_TILDE + "/bench_bends.dxf", object_names=[unfold["sketches"]["bend_lines"]], doc_name=D)
+        ent = reply["entities"] if ok else {}
+        judge(G, "export_dxf bend lines alone", ok, reply, ok and set(ent) == {"LINE"} and ent["LINE"] >= 1,
+              f"entities {ent} (bend lines only, no text)", f"{reply}")
         for name in ("bench_flat.dxf", "bench_bends.dxf"):
             if os.path.exists(os.path.join(SHARED_DIR, name)):
                 os.remove(os.path.join(SHARED_DIR, name))

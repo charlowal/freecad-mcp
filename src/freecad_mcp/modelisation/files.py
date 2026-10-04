@@ -200,7 +200,9 @@ _result_ = {{"redone": _done, "undo_available": list(doc.UndoNames), "redo_left"
 
         Give either a planar face, which is laid flat in XY with its outline
         and holes (the usual input for cutting a plate), or 2D objects such
-        as sketches.
+        as sketches. A face's lines in a row and arcs of one circle are joined
+        first, so a flat pattern whose outline the unfolder cut at each bend
+        line comes out with one line per side.
 
         Args:
             file_path: Path for the .dxf file (absolute, or starting with ~).
@@ -210,7 +212,7 @@ _result_ = {{"redone": _done, "undo_available": list(doc.UndoNames), "redo_left"
 
         Returns:
             path, the DXF entities written (counted from the file) and, for a
-            face, the flat size and area.
+            face, the flat size and area and how many edges were joined.
         """
         code = f"""
 import Part
@@ -223,6 +225,53 @@ if bool(_face_ref) == bool(_names):
     raise ValueError("Give either face or object_names")
 _temporary = None
 _flat_info = None
+
+
+def _joinable(_E, _V, _n, _i):
+    # Can edges i-1 and i, which meet at vertex i, make one edge?
+    _a, _b = _E[_i - 1], _E[_i]
+    _ta, _tb = type(_a.Curve).__name__, type(_b.Curve).__name__
+    if _ta == _tb == "Line":
+        _u, _v = _V[_i] - _V[_i - 1], _V[(_i + 1) % _n] - _V[_i]
+        return _u.dot(_v) > 0 and _u.cross(_v).Length <= 1e-6 * _u.Length * _v.Length
+    if _ta == _tb == "Circle":
+        _ca, _cb = _a.Curve, _b.Curve
+        return (_ca.Center.distanceToPoint(_cb.Center) <= 1e-6 and abs(_ca.Radius - _cb.Radius) <= 1e-6
+                and abs(abs(_ca.Axis.dot(_cb.Axis)) - 1) <= 1e-9)
+    return False
+
+
+def _merged_wire(_w):
+    # The wire with each run of lines in a row, or of arcs of one circle, made one edge
+    _E, _V = _w.OrderedEdges, [_x.Point for _x in _w.OrderedVertexes]
+    _n = len(_E)
+    if _n < 2 or len(_V) != _n or not _w.isClosed():
+        return _w
+    _joints = [_joinable(_E, _V, _n, _i) for _i in range(_n)]
+    if all(_joints):
+        # arcs that close on one circle, e.g. a hole in two halves
+        _c = _E[0].Curve
+        return Part.Wire(Part.makeCircle(_c.Radius, _c.Center, _c.Axis)) if type(_c).__name__ == "Circle" else _w
+    if not any(_joints):
+        return _w
+    _start = _joints.index(False)
+    _groups = []
+    for _k in range(_n):
+        _i = (_start + _k) % _n
+        if not _joints[_i]:
+            _groups.append([])
+        _groups[-1].append(_i)
+    _edges = []
+    for _g in _groups:
+        if len(_g) == 1:
+            _edges.append(_E[_g[0]])
+        elif type(_E[_g[0]].Curve).__name__ == "Line":
+            _edges.append(Part.LineSegment(_V[_g[0]], _V[(_g[-1] + 1) % _n]).toShape())
+        else:
+            _edges.append(Part.Arc(_V[_g[0]], _V[_g[1]], _V[(_g[-1] + 1) % _n]).toShape())
+    return Part.Wire(_edges)
+
+
 if _face_ref:
     if ":" not in _face_ref:
         raise ValueError("face must look like Feature:FaceN, e.g. Pad:Face6")
@@ -242,11 +291,21 @@ if _face_ref:
     _box = _flat.BoundBox
     if _box.ZLength > 1e-6:
         raise ValueError("Could not lay " + _face_ref + " flat (thickness " + str(_box.ZLength) + ")")
+    _joined = 0
+    try:
+        _merged = Part.makeFace([_merged_wire(_x) for _x in _flat.Wires], "Part::FaceMakerBullseye")
+    except Exception:
+        _merged = None
+    # Keep the joined face only if it is the same face: valid, same holes, same area
+    if (_merged is not None and _merged.isValid() and len(_merged.Wires) == len(_flat.Wires)
+            and abs(_merged.Area - _flat.Area) <= 1e-7 * max(_flat.Area, 1.0)):
+        _joined = len(_flat.Edges) - len(_merged.Edges)
+        _flat = _merged
     _temporary = doc.addObject("Part::Feature", "DxfFlatProfile")
     _temporary.Shape = _flat
     _objects = [_temporary]
     _flat_info = dict(width=round(_box.XLength, 6), height=round(_box.YLength, 6), area=round(_flat.Area, 6),
-                      holes=len(_flat.Wires) - 1)
+                      holes=len(_flat.Wires) - 1, joined_edges=_joined)
 else:
     _objects = [doc.getObject(n) for n in _names]
     _missing = [n for n, o in zip(_names, _objects) if o is None]

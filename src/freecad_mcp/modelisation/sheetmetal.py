@@ -52,14 +52,17 @@ def register_sheetmetal_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]
             k_factor: Position of the neutral fibre, 0 to 2.
             k_factor_standard: "ansi" (neutral fibre at K x thickness from
                 the inner surface) or "din" (at K x thickness / 2).
-            generate_sketches: Also make sketches of the outline, holes and
-                bend lines, ready for export_dxf(object_names=...).
+            generate_sketches: Also make sketches of the flat pattern, one per
+                layer: outline, holes, bend lines and bend labels.
             doc_name: Document. Uses active document if None.
 
         Returns:
             The unfold object, the fixed face, thickness, the flat face to
             pass to export_dxf, its size and area, the bend count and the
-            generated sketch names.
+            generated sketches by layer ("outline", "holes", "internal",
+            "bend_lines", "labels"). The labels are the bend direction and
+            angle drawn as lines and arcs: for a drawing, never for a
+            cutting file.
         """
         code = f"""
 import Part
@@ -94,6 +97,11 @@ try:
     _unfold.KFactor = {k_factor}
     _unfold.KFactorStandard = {k_factor_standard!r}
     _unfold.GenerateSketch = {generate_sketches}
+    if hasattr(_unfold, "SeparateSketchLayers"):
+        # One sketch per layer. Merged, SheetMetal's new unfolder puts the
+        # outline, the bend lines and the bend labels (text drawn as lines and
+        # arcs) in one sketch, which a laser would cut whole.
+        _unfold.SeparateSketchLayers = True
     if FreeCAD.GuiUp:
         SheetMetalUnfoldCmd.SMUnfoldViewProvider(_unfold.ViewObject)
     doc.recompute()
@@ -106,6 +114,15 @@ try:
     _laid = _face.copy()
     _laid.Placement = FreeCAD.Placement(FreeCAD.Vector(), FreeCAD.Rotation(_face.normalAt(0, 0), FreeCAD.Vector(0, 0, 1))).multiply(_laid.Placement)
     _box = _laid.BoundBox
+    # Sketch labels end in the layer: "" or "_Outline", "_Bends" or "_bends"
+    # (old unfolder), "_Internal", "_Holes", "_Bend_Labels", "_BendCuts"
+    _roles = dict(outline="outline", bends="bend_lines", internal="internal", holes="holes", bend_labels="labels", bendcuts="bend_cuts")
+    _sketches = dict()
+    for _n in list(getattr(_unfold, "UnfoldSketches", []) or []):
+        _o = doc.getObject(_n)
+        _label = _o.Label if _o is not None else _n
+        _tail = _label[len(_unfold.Label + "_Sketch"):] if _label.startswith(_unfold.Label + "_Sketch") else _label
+        _sketches[_roles.get(_tail.lstrip("_").lower() or "outline", _tail)] = _n
     doc.commitTransaction()
 except Exception:
     doc.abortTransaction()
@@ -126,8 +143,8 @@ _result_ = {{
     "flat_size": [round(_box.XLength, 6), round(_box.YLength, 6)],
     "flat_area": round(_face.Area, 6),
     "holes": len(_face.Wires) - 1,
-    "sketches": list(getattr(_unfold, "UnfoldSketches", []) or []),
-    "next": "export_dxf(face=flat_face) writes the outline and holes; export_dxf(object_names=sketches) adds the bend lines",
+    "sketches": _sketches,
+    "next": "export_dxf(face=flat_face) writes the cut: outline and holes; export_dxf(object_names=[sketches['bend_lines']]) writes the bend lines alone, for a marking layer; sketches['labels'] is for the drawing, not for a cutting file",
 }}
 """
         result = await (await get_bridge()).execute_python(code)
