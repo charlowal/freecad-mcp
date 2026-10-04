@@ -76,7 +76,7 @@ def register_spreadsheet_tools(
         bridge = await get_bridge()
 
         code = f"""
-doc = FreeCAD.ActiveDocument if {doc_name!r} is None else FreeCAD.getDocument({doc_name!r})
+doc = FreeCAD.ActiveDocument if {doc_name is None} else FreeCAD.getDocument({doc_name!r})
 if doc is None:
     doc = FreeCAD.newDocument("Unnamed")
 
@@ -145,7 +145,7 @@ except Exception:
         bridge = await get_bridge()
 
         code = f"""
-doc = FreeCAD.ActiveDocument if {doc_name!r} is None else FreeCAD.getDocument({doc_name!r})
+doc = FreeCAD.ActiveDocument if {doc_name is None} else FreeCAD.getDocument({doc_name!r})
 if doc is None:
     raise ValueError("No document found")
 
@@ -223,7 +223,7 @@ except Exception:
         bridge = await get_bridge()
 
         code = f"""
-doc = FreeCAD.ActiveDocument if {doc_name!r} is None else FreeCAD.getDocument({doc_name!r})
+doc = FreeCAD.ActiveDocument if {doc_name is None} else FreeCAD.getDocument({doc_name!r})
 if doc is None:
     raise ValueError("No document found")
 
@@ -305,7 +305,7 @@ _result_ = {{
         bridge = await get_bridge()
 
         code = f"""
-doc = FreeCAD.ActiveDocument if {doc_name!r} is None else FreeCAD.getDocument({doc_name!r})
+doc = FreeCAD.ActiveDocument if {doc_name is None} else FreeCAD.getDocument({doc_name!r})
 if doc is None:
     raise ValueError("No document found")
 
@@ -373,7 +373,7 @@ except Exception:
         bridge = await get_bridge()
 
         code = f"""
-doc = FreeCAD.ActiveDocument if {doc_name!r} is None else FreeCAD.getDocument({doc_name!r})
+doc = FreeCAD.ActiveDocument if {doc_name is None} else FreeCAD.getDocument({doc_name!r})
 if doc is None:
     raise ValueError("No document found")
 
@@ -434,7 +434,7 @@ _result_ = {{
         bridge = await get_bridge()
 
         code = f"""
-doc = FreeCAD.ActiveDocument if {doc_name!r} is None else FreeCAD.getDocument({doc_name!r})
+doc = FreeCAD.ActiveDocument if {doc_name is None} else FreeCAD.getDocument({doc_name!r})
 if doc is None:
     raise ValueError("No document found")
 
@@ -518,7 +518,7 @@ except Exception:
         bridge = await get_bridge()
 
         code = f"""
-doc = FreeCAD.ActiveDocument if {doc_name!r} is None else FreeCAD.getDocument({doc_name!r})
+doc = FreeCAD.ActiveDocument if {doc_name is None} else FreeCAD.getDocument({doc_name!r})
 if doc is None:
     raise ValueError("No document found")
 
@@ -608,7 +608,7 @@ except Exception:
         bridge = await get_bridge()
 
         code = f"""
-doc = FreeCAD.ActiveDocument if {doc_name!r} is None else FreeCAD.getDocument({doc_name!r})
+doc = FreeCAD.ActiveDocument if {doc_name is None} else FreeCAD.getDocument({doc_name!r})
 if doc is None:
     raise ValueError("No document found")
 
@@ -717,7 +717,7 @@ _result_ = {{
 import csv
 import re
 
-doc = FreeCAD.ActiveDocument if {doc_name!r} is None else FreeCAD.getDocument({doc_name!r})
+doc = FreeCAD.ActiveDocument if {doc_name is None} else FreeCAD.getDocument({doc_name!r})
 if doc is None:
     raise ValueError("No document found")
 
@@ -832,7 +832,7 @@ except Exception:
         code = f"""
 import csv
 
-doc = FreeCAD.ActiveDocument if {doc_name!r} is None else FreeCAD.getDocument({doc_name!r})
+doc = FreeCAD.ActiveDocument if {doc_name is None} else FreeCAD.getDocument({doc_name!r})
 if doc is None:
     raise ValueError("No document found")
 

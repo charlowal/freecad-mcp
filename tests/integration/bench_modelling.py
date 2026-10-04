@@ -696,12 +696,28 @@ _d.recompute(); R = True""")
     close(D)
 
 
+REPORT_VIEW = """
+from PySide import QtGui
+_views = [w for w in Gui.getMainWindow().findChildren(QtGui.QTextEdit) if w.objectName() == "Report view"]
+R = _views[0].toPlainText() if _views else None
+"""
+
+
 async def main() -> int:
+    report_before = q(REPORT_VIEW)
     for group in (bench_geometry, bench_constraints, bench_features, bench_spreadsheet, bench_files, bench_inspection):
         try:
             await group()
         except Exception as e:  # noqa: BLE001
             note(group.__name__, "(bench)", "BENCH_ERROR", repr(e)[:200])
+    # The tools must not litter FreeCAD's Report view: SyntaxWarnings from the
+    # scripts or deprecated properties show up there on every call.
+    report_after = q(REPORT_VIEW)
+    if report_before is not None and report_after is not None:
+        added = report_after[len(report_before):] if report_after.startswith(report_before[:200]) else report_after
+        noisy = [line for line in added.splitlines() if "SyntaxWarning" in line or "eprecated" in line]
+        note("report", "no warning in FreeCAD's Report view", "OK" if not noisy else "FALSE_SUCCESS",
+             f"{len(added.splitlines())} lines added, none is a SyntaxWarning or deprecation" if not noisy else f"{len(noisy)} lines, e.g. {noisy[0][:150]}")
     q("R = [App.closeDocument(_d) for _d in list(App.listDocuments()) if _d.startswith('Bench')]")
     totals = Counter(r[2] for r in RESULTS)
     print(f"\nTOTAL: {dict(totals)} over {len(RESULTS)} cases")

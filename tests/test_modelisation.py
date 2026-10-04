@@ -1,5 +1,6 @@
 import asyncio
 import inspect
+import warnings
 from typing import Any
 
 import pytest
@@ -61,11 +62,11 @@ def _sample(annotation: Any) -> Any:
 
 
 def _required_args(fn: Any) -> dict[str, Any]:
-    return {
-        name: _sample(p.annotation)
-        for name, p in inspect.signature(fn).parameters.items()
-        if p.default is inspect.Parameter.empty
-    }
+    params = inspect.signature(fn).parameters
+    args = {name: _sample(p.annotation) for name, p in params.items() if p.default is inspect.Parameter.empty}
+    if "doc_name" in params:
+        args["doc_name"] = "Doc"  # a named document is what a client usually passes
+    return args
 
 
 def test_registers_80_tools_and_skips_the_redundant_ones() -> None:
@@ -113,7 +114,10 @@ def test_every_tool_script_compiles(name: str) -> None:
         pass  # the canned result does not fit every tool; the scripts are what we test
     assert bridge.scripts, f"{name} sent no script"
     for script in bridge.scripts:
-        compile(wrap(script), name, "exec")
+        # FreeCAD prints every SyntaxWarning in its Report view, on each call
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", SyntaxWarning)
+            compile(wrap(script), name, "exec")
 
 
 @pytest.mark.parametrize("indent", [4, 8])

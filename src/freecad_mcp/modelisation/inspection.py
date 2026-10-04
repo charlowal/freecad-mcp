@@ -63,7 +63,7 @@ def register_inspection_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]
 
     def document(doc_name: str | None) -> str:
         return f"""
-doc = FreeCAD.ActiveDocument if {doc_name!r} is None else FreeCAD.getDocument({doc_name!r})
+doc = FreeCAD.ActiveDocument if {doc_name is None} else FreeCAD.getDocument({doc_name!r})
 if doc is None:
     raise ValueError("No document found")
 {_HELPERS}
@@ -281,7 +281,8 @@ if _density is None and {material!r}:
     if not _cards:
         _known = sorted(m.Name for m in Materials.MaterialManager().Materials.values()
                         if m.hasPhysicalProperty("Density") and {material!r}.lower().split("-")[0] in m.Name.lower())
-        raise ValueError("No material card with a density named " + {material!r} + "; close names: " + ", ".join(_known[:12]))
+        raise ValueError("No material card with a density named " + {material!r} + "; "
+                         + ("close names: " + ", ".join(_known[:12]) if _known else "pass density in kg/m3 instead"))
     _q = _cards[0].getPhysicalValue("Density").getValueAs("kg/m^3")
     _density, _source = float(getattr(_q, "Value", _q)), "material " + _cards[0].Name
 if _density is None and hasattr(_obj, "ShapeMaterial") and _obj.ShapeMaterial.Name != "Default":

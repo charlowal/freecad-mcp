@@ -28,7 +28,7 @@ def _build_object_selection_code(object_names: list[str] | None) -> str:
     """
     return f"""
 import Part
-if {object_names!r} is not None:
+if {object_names is not None}:
     objects = [doc.getObject(n) for n in {object_names!r}]
     missing = [n for n, o in zip({object_names!r}, objects) if o is None]
     if missing:
@@ -141,7 +141,7 @@ def register_export_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) ->
         code = f"""
 import Part
 
-doc = FreeCAD.ActiveDocument if {doc_name!r} is None else FreeCAD.getDocument({doc_name!r})
+doc = FreeCAD.ActiveDocument if {doc_name is None} else FreeCAD.getDocument({doc_name!r})
 if doc is None:
     raise ValueError("No document found")
 {_path_code(file_path)}{_build_object_selection_code(object_names)}
@@ -198,7 +198,7 @@ import Mesh
 import MeshPart
 import Part
 
-doc = FreeCAD.ActiveDocument if {doc_name!r} is None else FreeCAD.getDocument({doc_name!r})
+doc = FreeCAD.ActiveDocument if {doc_name is None} else FreeCAD.getDocument({doc_name!r})
 if doc is None:
     raise ValueError("No document found")
 {_path_code(file_path)}{_build_object_selection_code(object_names)}
@@ -264,7 +264,7 @@ import Mesh
 import MeshPart
 import Part
 
-doc = FreeCAD.ActiveDocument if {doc_name!r} is None else FreeCAD.getDocument({doc_name!r})
+doc = FreeCAD.ActiveDocument if {doc_name is None} else FreeCAD.getDocument({doc_name!r})
 if doc is None:
     raise ValueError("No document found")
 {_path_code(file_path)}{_build_object_selection_code(object_names)}
@@ -329,7 +329,7 @@ _result_ = {{
 import Mesh
 import MeshPart
 
-doc = FreeCAD.ActiveDocument if {doc_name!r} is None else FreeCAD.getDocument({doc_name!r})
+doc = FreeCAD.ActiveDocument if {doc_name is None} else FreeCAD.getDocument({doc_name!r})
 if doc is None:
     raise ValueError("No document found")
 {_path_code(file_path)}{_build_object_selection_code(object_names)}
@@ -390,7 +390,7 @@ _result_ = {{
         code = f"""
 import Part
 
-doc = FreeCAD.ActiveDocument if {doc_name!r} is None else FreeCAD.getDocument({doc_name!r})
+doc = FreeCAD.ActiveDocument if {doc_name is None} else FreeCAD.getDocument({doc_name!r})
 if doc is None:
     raise ValueError("No document found")
 {_path_code(file_path)}{_build_object_selection_code(object_names)}
@@ -439,14 +439,18 @@ import Part
 import os
 
 {_path_code(file_path, must_exist=True)}
-doc = FreeCAD.ActiveDocument if {doc_name!r} is None else FreeCAD.getDocument({doc_name!r})
+doc = FreeCAD.ActiveDocument if {doc_name is None} else FreeCAD.getDocument({doc_name!r})
 if doc is None:
     doc = FreeCAD.newDocument("Imported")
 
 # Get object count before import
 before_count = len(doc.Objects)
 
-Part.insert(path, doc.Name)
+try:
+    import ImportGui as _importer  # keeps names and colours; Part.insert is deprecated in 1.1
+except ImportError:
+    import Import as _importer
+_importer.insert(path, doc.Name)
 doc.recompute()
 
 # Get new objects
@@ -454,13 +458,17 @@ new_objects = [obj.Name for obj in doc.Objects[before_count:]]
 
 if not new_objects:
     raise ValueError("The STEP file added no object: " + path)
-_imported = [doc.getObject(n) for n in new_objects]
+# Count the leaf shapes only: an assembly comes in as App::Part containers
+# whose shape repeats their children's.
+_leaves = [o for o in (doc.getObject(n) for n in new_objects)
+           if hasattr(o, "Shape") and not o.Shape.isNull()
+           and not o.hasExtension("App::GroupExtension") and not o.hasExtension("App::GeoFeatureGroupExtension")]
 _result_ = {{
     "success": True,
     "document": doc.Name,
     "objects": new_objects,
-    "solids": sum(len(o.Shape.Solids) for o in _imported if hasattr(o, "Shape")),
-    "volume": round(sum(o.Shape.Volume for o in _imported if hasattr(o, "Shape") and o.Shape.Solids), 6),
+    "solids": sum(len(o.Shape.Solids) for o in _leaves),
+    "volume": round(sum(o.Shape.Volume for o in _leaves if o.Shape.Solids), 6),
 }}
 """
         result = await bridge.execute_python(code)
@@ -492,7 +500,7 @@ import Mesh
 import os
 
 {_path_code(file_path, must_exist=True)}
-doc = FreeCAD.ActiveDocument if {doc_name!r} is None else FreeCAD.getDocument({doc_name!r})
+doc = FreeCAD.ActiveDocument if {doc_name is None} else FreeCAD.getDocument({doc_name!r})
 if doc is None:
     doc = FreeCAD.newDocument("Imported")
 

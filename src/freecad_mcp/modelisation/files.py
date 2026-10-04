@@ -13,7 +13,7 @@ from .export import _path_code
 
 def _document_code(doc_name: str | None) -> str:
     return f"""
-doc = FreeCAD.ActiveDocument if {doc_name!r} is None else FreeCAD.getDocument({doc_name!r})
+doc = FreeCAD.ActiveDocument if {doc_name is None} else FreeCAD.getDocument({doc_name!r})
 if doc is None:
     raise ValueError("No document found")
 
