@@ -54,6 +54,37 @@ left as it was, and the error says what to change; a pocket that cuts into
 empty space, for instance, asks for `reversed=True`. A successful reply carries
 `verification` with `volume_before` and `volume_after`.
 
+## Files, documents and inspection
+
+| Group | Tools |
+| --- | --- |
+| Documents | `open_document`, `save_document`, `close_document`, `recompute_document`, `undo`, `redo` |
+| Export and import | `export_step`, `export_iges`, `export_stl`, `export_3mf`, `export_obj`, `export_dxf`, `import_step`, `import_stl` |
+| Inspection | `get_topology`, `measure_distance`, `measure_angle`, `mass_properties`, `check_interference`, `validate_object`, `validate_document` |
+
+The export tools (from spkane, see above) take the finished solids by default:
+PartDesign bodies and standalone solids, with their global placement, never
+the features inside a body, origin planes or sketches. Each export reads its
+file back and reports what it holds; a STEP whose solids differ from the
+source is an error. `export_dxf` lays a planar face flat in XY (outline and
+holes) for laser or waterjet cutting, or writes 2D objects such as sketches.
+
+A path may start with `~`. FreeCAD installed as a snap has its own HOME and a
+private `/tmp`; `~` still means the user's home there, and a path under
+`/tmp` is refused since the file would be out of reach.
+
+`close_document` refuses to drop unsaved changes unless `save` or
+`discard_changes` says what to do with them.
+
+`get_topology` lists faces (type, area, centre, normal or axis and radius)
+and edges (type, length, end points, radius, the two faces they join), with
+filters by type, by bounding face and by distance to a point, so the names
+passed to `fillet_edges`, `create_sketch(plane="Pad:Face6")` and the like
+come from the geometry instead of guesses. `mass_properties` takes its
+density from `density` (kg/m3), a FreeCAD material card such as
+`Steel-Generic` or `Aluminum-6061-T6`, or the material assigned to the
+object, and gives inertia about the centre of mass in kg.mm2.
+
 `tests/integration/bench_modelling.py` runs every tool against a live FreeCAD
 and judges each by a measurement read from FreeCAD, not by the tool's reply.
 
@@ -82,6 +113,13 @@ Use `get_view` to request a screenshot explicitly; it is available even with
 container. It auto-creates a `SolverCcxTools` if the analysis has none and returns
 max von Mises stress, max/min displacement, node count, and the solver's working
 directory. The default `timeout` is 600 seconds.
+
+The reply also lists the loads as the solver saw them (`applied_loads`: forces
+in N with their faces and direction, pressures in MPa, fixed faces). Check them:
+a plain number in `ConstraintForce.Force` is read as millinewtons, so
+`Force = 1000` applies 1 N and the results come out 1000 times too low without
+any error (#158); set it with its unit, e.g. `"1000 N"`. The force follows the
+loaded face's normal unless `Direction` links an edge or face.
 
 See [`examples/cantilever_fem.py`](../examples/cantilever_fem.py) for an end-to-end
 example, including geometry, material, mesh, constraints, and an analytical

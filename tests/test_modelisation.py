@@ -6,8 +6,8 @@ import pytest
 
 from freecad_mcp.modelisation import bridge as bridge_module
 from freecad_mcp.modelisation.bridge import RESULT_MARK, ExecuteCodeBridge, ExecutionResult, find_result, wrap
-from freecad_mcp.modelisation.partdesign import _check_solid, register_partdesign_tools
-from freecad_mcp.modelisation.spreadsheet import register_spreadsheet_tools
+from freecad_mcp.modelisation import SKIPPED_TOOLS, register_tools
+from freecad_mcp.modelisation.partdesign import _check_solid
 
 
 class FakeMCP:
@@ -39,8 +39,7 @@ def _modelling_tools(bridge: Any) -> dict[str, Any]:
     async def get_bridge():
         return bridge
 
-    register_partdesign_tools(mcp, get_bridge)
-    register_spreadsheet_tools(mcp, get_bridge)
+    register_tools(mcp, get_bridge)
     return mcp.tools
 
 
@@ -69,16 +68,19 @@ def _required_args(fn: Any) -> dict[str, Any]:
     }
 
 
-def test_registers_59_tools() -> None:
-    assert len(_modelling_tools(RecordingBridge())) == 59
+def test_registers_80_tools_and_skips_the_redundant_ones() -> None:
+    tools = _modelling_tools(RecordingBridge())
+    assert len(tools) == 80
+    assert not SKIPPED_TOOLS & set(tools)
 
 
 def test_server_registers_modelling_tools_beside_the_originals() -> None:
     from freecad_mcp import server
 
     names = [t.name for t in asyncio.run(server.mcp.list_tools())]
-    assert len(names) == len(set(names))
-    assert {"execute_code", "get_view", "pad_sketch", "constrain_angle", "spreadsheet_bind_property"} <= set(names)
+    assert len(names) == len(set(names)) == 97
+    assert {"execute_code", "get_view", "pad_sketch", "constrain_angle", "spreadsheet_bind_property",
+            "export_step", "export_dxf", "get_topology", "mass_properties", "undo"} <= set(names)
 
 
 def test_server_exposes_the_input_schema_of_the_wrapped_tools() -> None:

@@ -1,4 +1,4 @@
-"""Live bench for the modelling tools (PartDesign, Sketcher, Spreadsheet).
+"""Live bench for the modelling, file and inspection tools.
 
 Needs a running FreeCAD with the addon's RPC server; not collected by pytest.
 
@@ -25,9 +25,8 @@ from collections import Counter
 from typing import Any
 
 from freecad_mcp.freecad_client import FreeCADConnection
+from freecad_mcp.modelisation import register_tools
 from freecad_mcp.modelisation.bridge import ExecuteCodeBridge
-from freecad_mcp.modelisation.partdesign import register_partdesign_tools
-from freecad_mcp.modelisation.spreadsheet import register_spreadsheet_tools
 
 CONNECTION = FreeCADConnection(host="localhost", port=9875, token=os.environ.get("FREECAD_MCP_TOKEN"))
 SHARED_DIR = os.environ.get("BENCH_SHARED_DIR", os.path.expanduser("~/snap/freecad/common/mcp-headless"))
@@ -53,8 +52,7 @@ def _load_tools() -> dict[str, Any]:
     async def get_bridge():
         return bridge
 
-    register_partdesign_tools(registry, get_bridge)
-    register_spreadsheet_tools(registry, get_bridge)
+    register_tools(registry, get_bridge)
     return registry.tools
 
 
@@ -500,8 +498,206 @@ async def bench_spreadsheet() -> None:
     close(D)
 
 
+# --------------------------------------------------------------------------- 5. files
+
+HOLE = PI * 9 * 3  # the 6 mm hole through the 3 mm plate
+PLATE = 2400 - HOLE
+SHARED_TILDE = "~/" + os.path.relpath(SHARED_DIR, os.path.expanduser("~"))  # exercises ~ resolution
+
+
+async def holed_plate(doc: str) -> tuple[str, str, str]:
+    """A 40 x 20 x 3 plate with a 6 mm hole through it; returns body, pad, pocket."""
+    b = await new_body(doc)
+    p = await plate(doc, b, 0, 0, 40, 20, 3)
+    s = await sketch(doc, b, plane=f"{p}:{top_face(doc, p)}")
+    await T["add_sketch_circle"](sketch_name=s, center_x=20, center_y=10, radius=3, doc_name=doc)
+    pocket = (await T["pocket_sketch"](sketch_name=s, length=1, type="ThroughAll", doc_name=doc))["name"]
+    return b, p, pocket
+
+
+def read_brep(path: str) -> list:
+    return q(f"import Part\n_s = Part.Shape(); _s.read({path!r}); R = [len(_s.Solids), round(_s.Volume, 2), len(_s.Faces), round(_s.Area, 2)]")
+
+
+def read_mesh(path: str) -> list:
+    return q(f"import Mesh\n_m = Mesh.Mesh({path!r}); R = [_m.CountFacets, round(_m.Volume, 2)]")
+
+
+async def bench_files() -> None:
+    G, D = "files", "BenchFiles"
+    b, p, pocket = await holed_plate(D)
+    real = lambda name: os.path.join(SHARED_DIR, name)  # noqa: E731
+    tilde = lambda name: SHARED_TILDE + "/" + name  # noqa: E731
+
+    ok, reply = await call("export_step", file_path=tilde("bench.step"), doc_name=D)
+    back = read_brep(real("bench.step")) if ok and os.path.exists(real("bench.step")) else None
+    judge(G, "export_step (default selection)", ok, reply, back is not None and back[0] == 1 and abs(back[1] - PLATE) < 0.01 and reply["objects"] == [b],
+          f"file holds 1 solid of {back and back[1]} mm3, objects {reply.get('objects') if ok else None}", f"file {back}, objects {reply.get('objects') if ok else None}")
+    ok, reply = await call("export_step", file_path=tilde("bench_pad.step"), object_names=[p], doc_name=D)
+    back = read_brep(real("bench_pad.step")) if ok else None
+    judge(G, "export_step (named feature)", ok, reply, back is not None and back[0] == 1 and abs(back[1] - 2400) < 0.01, f"1 solid of {back and back[1]} mm3", f"file {back}")
+    ok, reply = await call("export_iges", file_path=tilde("bench.igs"), doc_name=D)
+    back = read_brep(real("bench.igs")) if ok else None
+    area = q(f"R = round(App.getDocument({D!r}).getObject({b!r}).Shape.Area, 2)")
+    judge(G, "export_iges", ok, reply, back is not None and back[2] == 7 and abs(back[3] - area) < 0.1, f"{back and back[2]} faces, area {back and back[3]}", f"file {back}, expected area {area}")
+    for tool, ext in (("export_stl", "stl"), ("export_3mf", "3mf"), ("export_obj", "obj")):
+        ok, reply = await call(tool, file_path=tilde(f"bench.{ext}"), doc_name=D)
+        back = read_mesh(real(f"bench.{ext}")) if ok else None
+        judge(G, tool, ok, reply, back is not None and back[0] > 0 and abs(back[1] - PLATE) < 0.02 * PLATE,
+              f"{back and back[0]} facets, mesh volume {back and back[1]}", f"file {back}")
+    ok, reply = await call("export_step", file_path="/tmp/bench.step", doc_name=D)
+    judge(G, "export_step to /tmp refused", not ok, reply, "home" in str(reply), "refused with the snap hint", f"{reply}")
+    ok, reply = await call("export_dxf", file_path=tilde("bench.dxf"), face=f"{pocket}:{top_face(D, pocket)}", doc_name=D)
+    ent = reply.get("entities") if ok else None
+    flat = reply.get("flat") if ok else None
+    judge(G, "export_dxf (top face)", ok, reply, ent == {"LINE": 4, "CIRCLE": 1} and flat["width"] == 40 and flat["height"] == 20 and flat["holes"] == 1,
+          f"entities {ent}, flat {flat}", f"entities {ent}, flat {flat}")
+    side = q(f"""_sh = App.getDocument({D!r}).getObject({pocket!r}).Shape
+R = "Face" + str(min(range(len(_sh.Faces)), key=lambda i: _sh.Faces[i].CenterOfMass.y if type(_sh.Faces[i].Surface).__name__ == "Plane" else 1e9) + 1)""")
+    ok, reply = await call("export_dxf", file_path=tilde("bench_side.dxf"), face=f"{pocket}:{side}", doc_name=D)
+    flat = reply.get("flat") if ok else None
+    judge(G, "export_dxf (side face, laid flat)", ok, reply, flat is not None and sorted([flat["width"], flat["height"]]) == [3, 40] and reply["entities"].get("LINE") == 4,
+          f"flat {flat}, entities {reply.get('entities') if ok else None}", f"flat {flat}")
+    q(f"App.getDocument({D!r}).getObject({pocket!r}).Profile[0].Visibility = True; R = True")
+    sk_name = q(f"R = App.getDocument({D!r}).getObject({pocket!r}).Profile[0].Name")
+    ok, reply = await call("export_dxf", file_path=tilde("bench_sketch.dxf"), object_names=[sk_name], doc_name=D)
+    judge(G, "export_dxf (sketch)", ok, reply, ok and reply["entities"].get("CIRCLE") == 1, f"entities {reply.get('entities') if ok else None}", f"{reply}")
+
+    # undo / redo on the pocket
+    before = body_state(D, b)["vol"]
+    ok, reply = await call("undo", doc_name=D)
+    undone = body_state(D, b)["vol"]
+    ok2, reply2 = await call("redo", doc_name=D)
+    redone = body_state(D, b)["vol"]
+    judge(G, "undo then redo", ok and ok2, reply if not ok else reply2, abs(undone - 2400) < 0.01 and abs(redone - before) < 0.01,
+          f"{before} -> undo {undone} -> redo {redone}", f"{before} -> undo {undone} -> redo {redone} ({reply} / {reply2})")
+    ok, reply = await call("undo", doc_name=D, steps=1000)
+    judge(G, "undo beyond history refused", not ok, reply, "available" in str(reply), "refused, history listed", str(reply))
+
+    # save, close, open
+    ok, reply = await call("close_document", doc_name=D)
+    still = D in q("R = list(App.listDocuments())")
+    judge(G, "close refuses unsaved changes", not ok, reply, still and "unsaved changes" in str(reply), "refused, document still open", f"{reply}, open={still}")
+    ok, reply = await call("save_document", doc_name=D, file_path=tilde("bench_doc"))
+    saved = real("bench_doc.FCStd")
+    judge(G, "save_document", ok, reply, os.path.exists(saved) and reply["path"] == saved, f"{reply.get('bytes') if ok else None} bytes at {saved}", f"{reply}")
+    ok, reply = await call("close_document", doc_name=D)
+    judge(G, "close_document after save", ok, reply, D not in q("R = list(App.listDocuments())"), "closed", f"{reply}")
+    ok, reply = await call("open_document", file_path=tilde("bench_doc.FCStd"))
+    D = reply["name"] if ok else D  # a reopened document is named after its file
+    vol = body_state(D, b)["vol"] if ok else None
+    judge(G, "open_document", ok, reply, ok and abs(vol - PLATE) < 0.01, f"{D}: {reply.get('object_count') if ok else None} objects, body {vol} mm3", f"{reply}, body {vol}")
+    ok, reply = await call("recompute_document", doc_name=D)
+    judge(G, "recompute_document", ok, reply, ok and reply["objects_in_error"] == [], f"{reply.get('recomputed') if ok else None} recomputed, no error", f"{reply}")
+    q(f"App.getDocument({D!r}).addObject('Part::Box', 'Extra'); App.getDocument({D!r}).recompute(); R = True")
+    ok, reply = await call("close_document", doc_name=D)
+    still = D in q("R = list(App.listDocuments())")
+    judge(G, "close refuses changes made after a save", not ok, reply, still and "unsaved changes" in str(reply), "refused, document still open", f"{reply}, open={still}")
+    ok, reply = await call("close_document", doc_name=D, discard_changes=True)
+    judge(G, "close_document discard_changes", ok, reply, D not in q("R = list(App.listDocuments())"), "closed, change discarded", f"{reply}")
+
+    # imports
+    q("R = [App.closeDocument(d) for d in list(App.listDocuments()) if d == 'BenchImport']; App.newDocument('BenchImport'); R = True")
+    ok, reply = await call("import_step", file_path=tilde("bench.step"), doc_name="BenchImport")
+    judge(G, "import_step", ok, reply, ok and reply["solids"] == 1 and abs(reply["volume"] - PLATE) < 0.01, f"{reply.get('solids') if ok else None} solid, {reply.get('volume') if ok else None} mm3", f"{reply}")
+    ok, reply = await call("import_stl", file_path=tilde("bench.stl"), doc_name="BenchImport")
+    facets = q(f"R = App.getDocument('BenchImport').getObject({reply['object']!r}).Mesh.CountFacets") if ok else None
+    judge(G, "import_stl", ok, reply, ok and facets and facets == reply["facets"], f"{facets} facets", f"{reply}")
+    ok, reply = await call("import_step", file_path=tilde("missing.step"), doc_name="BenchImport")
+    judge(G, "import of a missing file refused", not ok, reply, "not found" in str(reply), "refused", str(reply))
+    close("BenchImport")
+    for name in ("bench.step", "bench_pad.step", "bench.igs", "bench.stl", "bench.3mf", "bench.obj", "bench.dxf", "bench_side.dxf", "bench_sketch.dxf", "bench_doc.FCStd"):
+        if os.path.exists(real(name)):
+            os.remove(real(name))
+    for leftover in os.listdir(SHARED_DIR):
+        if leftover.startswith("bench_doc"):
+            os.remove(real(leftover))
+
+
+# --------------------------------------------------------------------------- 6. inspection
+
+async def bench_inspection() -> None:
+    G, D = "inspect", "BenchInspect"
+    b, p, pocket = await holed_plate(D)
+    ok, reply = await call("get_topology", object_name=pocket, doc_name=D)
+    faces = {f["name"]: f for f in reply["faces"]} if ok else {}
+    top = [f for f in faces.values() if f["type"] == "Plane" and f.get("normal") == [0.0, 0.0, 1.0]]
+    cyl = [f for f in faces.values() if f["type"] == "Cylinder"]
+    # every edge joins two faces, except the hole's seam, which runs along the cylinder only
+    single = [e for e in reply["edges"] if len(e["faces"]) != 2] if ok else []
+    lines_ok = ok and len(single) == 1 and cyl and single[0]["faces"] == [cyl[0]["name"]]
+    judge(G, "get_topology", ok, reply, ok and reply["face_count"] == 7 and reply["edge_count"] == 15 and len(top) == 1
+          and abs(top[0]["center"][2] - 3) < 1e-6 and len(cyl) == 1 and cyl[0]["radius"] == 3 and lines_ok,
+          f"{reply.get('face_count') if ok else None} faces, {reply.get('edge_count') if ok else None} edges, top {top and top[0]['name']}, hole r={cyl and cyl[0]['radius']}, edges join 2 faces but the seam",
+          f"faces {reply.get('face_count') if ok else None}, top {top}, cyl {cyl}, edges joined={lines_ok}")
+    top_name = top[0]["name"] if top else "Face1"
+    ok, reply = await call("get_topology", object_name=pocket, kind="edges", on_face=top_name, doc_name=D)
+    kinds = sorted(e["type"] for e in reply["edges"]) if ok else None
+    judge(G, "get_topology on_face", ok, reply, kinds is not None and kinds.count("Line") == 4 and kinds.count("Circle") == 1, f"edges of {top_name}: {kinds}", f"{kinds}")
+    ok, reply = await call("get_topology", object_name=pocket, kind="edges", near=[0, 0, 3], limit=3, doc_name=D)
+    dist = [e["distance"] for e in reply["edges"]] if ok else None
+    judge(G, "get_topology near", ok, reply, dist is not None and len(dist) == 3 and dist == sorted(dist) and dist[0] < 10.01,
+          f"3 nearest edges at {dist}", f"{dist}")
+
+    # the workflow topology -> fillet: round the four vertical edges
+    ok, reply = await call("get_topology", object_name=pocket, kind="edges", element_type="Line", doc_name=D)
+    vertical = [e["name"] for e in reply["edges"]
+                if e.get("direction") and abs(abs(e["direction"][2]) - 1) < 1e-9 and len(e["faces"]) == 2] if ok else []
+    v0 = solid(D, pocket)["vol"]
+    ok, reply = await call("fillet_edges", object_name=pocket, radius=2, edges=vertical, doc_name=D)
+    v1 = solid(D, reply["name"])["vol"] if ok else None
+    expected = v0 - 4 * (4 - PI) * 3
+    judge(G, "fillet the edges found by topology", ok, reply, len(vertical) == 4 and v1 is not None and abs(v1 - expected) < 0.01,
+          f"{vertical}: {v0} -> {v1} (expected {round(expected, 2)})", f"vertical={vertical}, volume {v1}")
+    q(f"App.getDocument({D!r}).undo(); App.getDocument({D!r}).recompute(); R = True")
+
+    bottom = [f["name"] for f in faces.values() if f["type"] == "Plane" and f.get("normal") == [0.0, 0.0, -1.0]]
+    side = [f["name"] for f in faces.values() if f["type"] == "Plane" and abs(f.get("normal", [0, 0, 1])[2]) < 1e-9]
+    ok, reply = await call("measure_distance", element_a=f"{pocket}:{top_name}", element_b=f"{pocket}:{bottom[0]}", doc_name=D)
+    judge(G, "measure_distance face-face", ok, reply, ok and abs(reply["distance"] - 3) < 1e-6, f"{reply.get('distance') if ok else None} mm", f"{reply}")
+    ok, reply = await call("measure_distance", element_a=[20, 10, 10], element_b=f"{pocket}:{top_name}", doc_name=D)
+    rim = math.sqrt(7 ** 2 + 3 ** 2)  # the hole is under the point: the nearest point is on its rim
+    judge(G, "measure_distance point-face", ok, reply, ok and abs(reply["distance"] - rim) < 1e-6,
+          f"{reply.get('distance') if ok else None} mm to {reply.get('point_b') if ok else None} (expected {round(rim, 6)}, on the rim)", f"{reply}")
+    ok, reply = await call("measure_angle", element_a=f"{pocket}:{top_name}", element_b=f"{pocket}:{side[0]}", doc_name=D)
+    judge(G, "measure_angle face-face", ok, reply, ok and abs(reply["angle"] - 90) < 1e-6, f"{reply.get('angle') if ok else None} deg", f"{reply}")
+    ok, reply = await call("measure_angle", element_a=f"{pocket}:{vertical[0]}", element_b=f"{pocket}:{top_name}", doc_name=D)
+    judge(G, "measure_angle edge-plane", ok, reply, ok and abs(reply["angle"] - 90) < 1e-6, f"{reply.get('angle') if ok else None} deg", f"{reply}")
+
+    ok, reply = await call("mass_properties", object_name=b, density=7850, doc_name=D)
+    izz = (400000 - HOLE * 4.5) * 7850e-9  # box (a2+b2)/12 minus the hole r2/2, unit density x rho
+    judge(G, "mass_properties density", ok, reply, ok and abs(reply["mass"] - PLATE * 7850e-9) < 1e-9 and reply["center_of_mass"] == [20.0, 10.0, 1.5]
+          and abs(max(reply["principal_moments"]) - izz) < 1e-6,
+          f"{reply.get('mass') if ok else None} kg at {reply.get('center_of_mass') if ok else None}, Izz {max(reply['principal_moments']) if ok else None} (expected {round(izz, 6)})", f"{reply}")
+    ok, reply = await call("mass_properties", object_name=b, material="Aluminum-6061-T6", doc_name=D)
+    judge(G, "mass_properties material card", ok, reply, ok and abs(reply["density"] - 2700) < 1e-6 and abs(reply["mass"] - PLATE * 2.7e-6) < 1e-9,
+          f"{reply.get('density') if ok else None} kg/m3 from {reply.get('density_source') if ok else None}", f"{reply}")
+    ok, reply = await call("mass_properties", object_name=b, doc_name=D)
+    judge(G, "mass_properties without density", ok, reply, ok and reply["mass"] is None and reply["note"], "mass None with a note", f"{reply}")
+    ok, reply = await call("mass_properties", object_name=b, material="Unobtainium", doc_name=D)
+    judge(G, "mass_properties unknown material", not ok, reply, "No material card" in str(reply), "refused", str(reply))
+    ok, reply = await call("validate_object", object_name=b, doc_name=D)
+    judge(G, "validate_object", ok, reply, ok and reply.get("valid") is True, "valid", f"{reply}")
+    ok, reply = await call("validate_document", doc_name=D)
+    judge(G, "validate_document", ok, reply, ok and reply.get("valid") is True, "valid", f"{str(reply)[:150]}")
+    close(D)
+
+    D = "BenchClash"
+    close(D)
+    q(f"""_d = App.newDocument({D!r})
+for _n, _x, _y in (("A", 0, 0), ("B", 5, 0), ("C", 0, 10), ("Far", 100, 0)):
+    _o = _d.addObject("Part::Box", _n); _o.Placement.Base = App.Vector(_x, _y, 0)
+_d.recompute(); R = True""")
+    ok, reply = await call("check_interference", doc_name=D)
+    overlaps = sorted((tuple(o["objects"]), round(o["shared_volume"], 3)) for o in reply["overlaps"]) if ok else None
+    touching = sorted(tuple(t) for t in reply["touching"]) if ok else None
+    judge(G, "check_interference", ok, reply, overlaps == [(("A", "B"), 500.0)] and touching == [("A", "C"), ("B", "C")],
+          f"overlaps {overlaps}, touching {touching}", f"overlaps {overlaps}, touching {touching}")
+    close(D)
+
+
 async def main() -> int:
-    for group in (bench_geometry, bench_constraints, bench_features, bench_spreadsheet):
+    for group in (bench_geometry, bench_constraints, bench_features, bench_spreadsheet, bench_files, bench_inspection):
         try:
             await group()
         except Exception as e:  # noqa: BLE001
