@@ -2,7 +2,7 @@
 
 partdesign, spreadsheet, export and validation are vendored from
 spkane/freecad-addon-robust-mcp-server (MIT, see LICENSE-spkane) and fixed
-for FreeCAD 1.1; files and inspection are written here. All run on this
+for FreeCAD 1.1; files, inspection and drawing are written here. All run on this
 addon's execute_code through :class:`ExecuteCodeBridge`. Every feature tool
 checks that the solid changed as expected and undoes the feature otherwise;
 every export reads its file back.
@@ -12,6 +12,7 @@ import functools
 from typing import Any, Callable
 
 from .bridge import ExecuteCodeBridge
+from .drawing import register_drawing_tools
 from .export import register_export_tools
 from .files import register_file_tools
 from .inspection import register_inspection_tools
@@ -67,6 +68,7 @@ TOOL_MODULES = (
     register_validation_tools,
     register_file_tools,
     register_inspection_tools,
+    register_drawing_tools,
 )
 
 

@@ -54,6 +54,47 @@ left as it was, and the error says what to change; a pocket that cuts into
 empty space, for instance, asks for `reversed=True`. A successful reply carries
 `verification` with `volume_before` and `volume_after`.
 
+## Drawings (TechDraw)
+
+16 tools draft mechanical drawings on FreeCAD's ASME templates, in dual units
+mm [in], third-angle projection and AWS weld symbols by default; each choice
+is a parameter.
+
+| Group | Tools |
+| --- | --- |
+| Sheet | `create_drawing_page`, `fill_title_block`, `add_revision_table`, `export_drawing` (PDF or SVG, plus a PNG) |
+| Views | `add_drawing_views` (largest standard scale that fits, layout checked on the sheet), `add_section_view` |
+| Dimensions | `add_dimension`, `refresh_dual_dimensions`, `add_hole_callouts`, `add_hole_table` |
+| Annotations | `add_gdt_frame`, `add_datum_symbol`, `add_weld_symbol`, `add_parts_list` (with balloons) |
+| Whole sheet | `create_drawing` (sheet, views, overall dimensions, hole callouts, parts list, then the check), `check_drawing` |
+
+Dimensions are given by model points, `points=[[0, 0, 0], [120, 0, 0]]`, or by
+a circle's centre; the tool finds the vertex or circle they project to in the
+view and refuses a point that is not drawn there. TechDraw has no second unit,
+so the text is written from TechDraw's own measurement, which must equal the
+geometry's; `refresh_dual_dimensions` rewrites the texts after a model change.
+
+`add_hole_callouts` finds holes in the solids themselves (drill, THRU or ↧
+depth, ⌴ counterbore, ⌵ countersink; identical holes share "2X"), so imported
+STEP parts work too. Threads are not recognised. `add_gdt_frame` refuses
+frames that cannot be right, such as a datum on a form tolerance, an
+orientation tolerance without datum, or a modifier where none applies.
+
+`check_drawing` answers PASS, FAIL, NON_VERIFIE or NON_APPLICABLE per check,
+with the evidence: views drawn, inside the frame, off the title block and
+apart; dimensions and notes inside the frame; projection; scale field; title
+block without template sample text; every dimension tied to geometry, in dual
+units, its text recomputed from the geometry; decimal point; every hole called
+out; GD&T datums shown; parts list against balloons. What only a person can
+judge (complete dimensioning, conformity to a standard, whether a joint is
+welded) is NON_VERIFIE, never PASS. Nothing is approved: unknown title-block
+fields read "À RENSEIGNER", "Checked by" reads "À VÉRIFIER" and the approval
+fields stay empty.
+
+`export_drawing` needs the GUI: TechDraw renders a page only once it is shown,
+so the tool opens it, exports, and brings the 3D view back to front, since
+`get_view` fails while a sheet is in front.
+
 ## Files, documents and inspection
 
 | Group | Tools |

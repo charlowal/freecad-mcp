@@ -9,6 +9,7 @@ from freecad_mcp.modelisation import bridge as bridge_module
 from freecad_mcp.modelisation.bridge import RESULT_MARK, ExecuteCodeBridge, ExecutionResult, find_result, wrap
 from freecad_mcp.modelisation import SKIPPED_TOOLS, register_tools
 from freecad_mcp.modelisation.partdesign import _check_solid
+from freecad_mcp.modelisation import ToolError
 
 
 class FakeMCP:
@@ -46,6 +47,10 @@ def _modelling_tools(bridge: Any) -> dict[str, Any]:
 
 def _sample(annotation: Any) -> Any:
     text = str(annotation)
+    if "list[dict" in text:
+        return [{"rev": "A", "description": "First issue"}]
+    if text.startswith("dict"):
+        return {"title": "Bracket"}
     if "list[list" in text:
         return [[0.0, 0.0], [10.0, 5.0], [20.0, 0.0]]
     if "list[float]" in text:
@@ -61,17 +66,24 @@ def _sample(annotation: Any) -> Any:
     return "Obj"
 
 
+# Values a tool checks before it builds its script
+_SAMPLES = {"letter": "A", "characteristic": "position"}
+
+
 def _required_args(fn: Any) -> dict[str, Any]:
     params = inspect.signature(fn).parameters
-    args = {name: _sample(p.annotation) for name, p in params.items() if p.default is inspect.Parameter.empty}
+    args = {name: _SAMPLES.get(name, _sample(p.annotation)) for name, p in params.items()
+            if p.default is inspect.Parameter.empty}
+    if fn.__name__ == "add_gdt_frame":
+        args["datums"] = ["A"]
     if "doc_name" in params:
         args["doc_name"] = "Doc"  # a named document is what a client usually passes
     return args
 
 
-def test_registers_80_tools_and_skips_the_redundant_ones() -> None:
+def test_registers_96_tools_and_skips_the_redundant_ones() -> None:
     tools = _modelling_tools(RecordingBridge())
-    assert len(tools) == 80
+    assert len(tools) == 96
     assert not SKIPPED_TOOLS & set(tools)
 
 
@@ -79,9 +91,10 @@ def test_server_registers_modelling_tools_beside_the_originals() -> None:
     from freecad_mcp import server
 
     names = [t.name for t in asyncio.run(server.mcp.list_tools())]
-    assert len(names) == len(set(names)) == 97
+    assert len(names) == len(set(names)) == 113
     assert {"execute_code", "get_view", "pad_sketch", "constrain_angle", "spreadsheet_bind_property",
-            "export_step", "export_dxf", "get_topology", "mass_properties", "undo"} <= set(names)
+            "export_step", "export_dxf", "get_topology", "mass_properties", "undo",
+            "create_drawing", "add_dimension", "check_drawing"} <= set(names)
 
 
 def test_server_exposes_the_input_schema_of_the_wrapped_tools() -> None:
@@ -110,7 +123,7 @@ def test_every_tool_script_compiles(name: str) -> None:
     fn = _modelling_tools(bridge)[name]
     try:
         asyncio.run(fn(**_required_args(fn)))
-    except (KeyError, TypeError, ValueError):
+    except (KeyError, TypeError, ValueError, ToolError):
         pass  # the canned result does not fit every tool; the scripts are what we test
     assert bridge.scripts, f"{name} sent no script"
     for script in bridge.scripts:
