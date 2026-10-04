@@ -17,6 +17,7 @@ from .export import register_export_tools
 from .files import register_file_tools
 from .inspection import register_inspection_tools
 from .partdesign import register_partdesign_tools
+from .sheetmetal import register_sheetmetal_tools
 from .spreadsheet import register_spreadsheet_tools
 from .validation import register_validation_tools
 
@@ -69,6 +70,7 @@ TOOL_MODULES = (
     register_file_tools,
     register_inspection_tools,
     register_drawing_tools,
+    register_sheetmetal_tools,
 )
 
 

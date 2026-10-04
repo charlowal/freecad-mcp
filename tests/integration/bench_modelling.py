@@ -696,6 +696,50 @@ _d.recompute(); R = True""")
     close(D)
 
 
+# --------------------------------------------------------------------------- 7. sheet metal
+
+async def bench_sheetmetal() -> None:
+    G, D = "sheet-metal", "BenchSheetMetal"
+    close(D)
+    # an L bracket: 2 mm thick, 2 mm inner bend radius, legs 30 and 20 mm, 25 mm wide
+    q(f"""import Part
+_d = App.newDocument({D!r})
+_t, _r, _w = 2.0, 2.0, 25.0
+_ro = _r + _t
+_h = Part.makeBox(30 - _ro, _w, _t, App.Vector(_ro, 0, 0))
+_v = Part.makeBox(_t, _w, 20 - _ro, App.Vector(0, 0, _ro))
+_ring = Part.makeCylinder(_ro, _w, App.Vector(_ro, 0, _ro), App.Vector(0, 1, 0)).cut(Part.makeCylinder(_r, _w, App.Vector(_ro, 0, _ro), App.Vector(0, 1, 0)))
+_o = _d.addObject("Part::Feature", "Bracket"); _o.Shape = _h.fuse([_v, _ring.common(Part.makeBox(_ro, _w, _ro))]).removeSplitter()
+_d.recompute(); R = True""")
+    ansi = 26 + 16 + PI / 2 * (2 + 0.4 * 2)  # straight legs + bend allowance on the neutral fibre
+    ok, reply = await call("sheetmetal_unfold", object_name="Bracket", doc_name=D)
+    size = sorted(reply["flat_size"]) if ok else None
+    judge(G, "sheetmetal_unfold ansi", ok, reply, ok and abs(size[1] - ansi) < 1e-3 and abs(size[0] - 25) < 1e-6 and reply["bends"] == 1 and abs(reply["thickness"] - 2) < 1e-6,
+          f"flat {size}, expected {round(ansi, 3)} x 25", f"{reply}")
+    unfold = reply if ok else None
+    din = 26 + 16 + PI / 2 * (2 + 0.4 * 2 / 2)
+    ok, reply = await call("sheetmetal_unfold", object_name="Bracket", k_factor_standard="din", generate_sketches=False, doc_name=D)
+    size = sorted(reply["flat_size"]) if ok else None
+    judge(G, "sheetmetal_unfold din", ok, reply, ok and abs(size[1] - din) < 1e-3, f"flat {size}, expected {round(din, 3)} x 25", f"{reply}")
+    curved = q(f"_s = App.getDocument({D!r}).getObject('Bracket').Shape; R = 'Face' + str([i for i, f in enumerate(_s.Faces) if type(f.Surface).__name__ == 'Cylinder'][0] + 1)")
+    ok, reply = await call("sheetmetal_unfold", object_name="Bracket", face=curved, doc_name=D)
+    judge(G, "unfold from a curved face refused", not ok, reply, "not a planar face" in str(reply), "refused", str(reply))
+    if unfold:
+        real = os.path.join(SHARED_DIR, "bench_flat.dxf")
+        ok, reply = await call("export_dxf", file_path=SHARED_TILDE + "/bench_flat.dxf", face=unfold["flat_face"], doc_name=D)
+        flat = reply.get("flat") if ok else None
+        judge(G, "export_dxf flat pattern", ok, reply, ok and reply["entities"] == {"LINE": 4} and abs(max(flat["width"], flat["height"]) - ansi) < 1e-3,
+              f"entities {reply.get('entities') if ok else None}, flat {flat}", f"{reply}")
+        ok, reply = await call("export_dxf", file_path=SHARED_TILDE + "/bench_bends.dxf", object_names=unfold["sketches"], doc_name=D)
+        lines = reply["entities"].get("LINE", 0) if ok else 0
+        judge(G, "export_dxf flat pattern with bend lines", ok, reply, ok and lines >= 5,
+              f"entities {reply.get('entities') if ok else None} (outline 4 + bend lines)", f"{reply}")
+        for name in ("bench_flat.dxf", "bench_bends.dxf"):
+            if os.path.exists(os.path.join(SHARED_DIR, name)):
+                os.remove(os.path.join(SHARED_DIR, name))
+    close(D)
+
+
 REPORT_VIEW = """
 from PySide import QtGui
 _views = [w for w in Gui.getMainWindow().findChildren(QtGui.QTextEdit) if w.objectName() == "Report view"]
@@ -705,7 +749,7 @@ R = _views[0].toPlainText() if _views else None
 
 async def main() -> int:
     report_before = q(REPORT_VIEW)
-    for group in (bench_geometry, bench_constraints, bench_features, bench_spreadsheet, bench_files, bench_inspection):
+    for group in (bench_geometry, bench_constraints, bench_features, bench_spreadsheet, bench_files, bench_inspection, bench_sheetmetal):
         try:
             await group()
         except Exception as e:  # noqa: BLE001
@@ -715,9 +759,14 @@ async def main() -> int:
     report_after = q(REPORT_VIEW)
     if report_before is not None and report_after is not None:
         added = report_after[len(report_before):] if report_after.startswith(report_before[:200]) else report_after
-        noisy = [line for line in added.splitlines() if "SyntaxWarning" in line or "eprecated" in line]
-        note("report", "no warning in FreeCAD's Report view", "OK" if not noisy else "FALSE_SUCCESS",
-             f"{len(added.splitlines())} lines added, none is a SyntaxWarning or deprecation" if not noisy else f"{len(noisy)} lines, e.g. {noisy[0][:150]}")
+        # The bench's deliberate refusals must each show as one "MCP tool
+        # refused" line, never as a traceback with the whole script.
+        noise = ("SyntaxWarning", "eprecated", "Traceback", "--- code ---")
+        noisy = [line for line in added.splitlines() if any(n in line for n in noise)]
+        refusals = sum("MCP tool refused:" in line for line in added.splitlines())
+        note("report", "no warning in FreeCAD's Report view", "OK" if not noisy and refusals else "FALSE_SUCCESS",
+             f"{len(added.splitlines())} lines added: {refusals} one-line refusals, no SyntaxWarning, deprecation, traceback or script"
+             if not noisy and refusals else f"{len(noisy)} noisy lines (e.g. {noisy[0][:120] if noisy else '-'}), {refusals} refusals")
     q("R = [App.closeDocument(_d) for _d in list(App.listDocuments()) if _d.startswith('Bench')]")
     totals = Counter(r[2] for r in RESULTS)
     print(f"\nTOTAL: {dict(totals)} over {len(RESULTS)} cases")

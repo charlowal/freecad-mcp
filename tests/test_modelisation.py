@@ -81,9 +81,9 @@ def _required_args(fn: Any) -> dict[str, Any]:
     return args
 
 
-def test_registers_96_tools_and_skips_the_redundant_ones() -> None:
+def test_registers_97_tools_and_skips_the_redundant_ones() -> None:
     tools = _modelling_tools(RecordingBridge())
-    assert len(tools) == 96
+    assert len(tools) == 97
     assert not SKIPPED_TOOLS & set(tools)
 
 
@@ -91,7 +91,7 @@ def test_server_registers_modelling_tools_beside_the_originals() -> None:
     from freecad_mcp import server
 
     names = [t.name for t in asyncio.run(server.mcp.list_tools())]
-    assert len(names) == len(set(names)) == 113
+    assert len(names) == len(set(names)) == 114
     assert {"execute_code", "get_view", "pad_sketch", "constrain_angle", "spreadsheet_bind_property",
             "export_step", "export_dxf", "get_topology", "mass_properties", "undo",
             "create_drawing", "add_dimension", "check_drawing"} <= set(names)
@@ -130,6 +130,7 @@ def test_every_tool_script_compiles(name: str) -> None:
         # FreeCAD prints every SyntaxWarning in its Report view, on each call
         with warnings.catch_warnings():
             warnings.simplefilter("error", SyntaxWarning)
+            compile(script, name, "exec")  # the tool's own lines, run by the nested exec
             compile(wrap(script), name, "exec")
 
 
@@ -146,6 +147,18 @@ def test_check_snippet_nests_in_a_transaction_block(indent: int) -> None:
         "    raise\n"
     )
     compile(code, "snippet", "exec")
+
+
+def test_wrap_turns_a_refusal_into_tool_refusal_and_keeps_other_errors() -> None:
+    namespace: dict[str, Any] = {}
+    with pytest.raises(Exception) as refused:
+        exec(wrap("raise ValueError('Pocket removed no material; retry with reversed=True')"), namespace)
+    assert type(refused.value).__name__ == "ToolRefusal" and "reversed=True" in str(refused.value)
+    with pytest.raises(ZeroDivisionError):
+        exec(wrap("1 / 0"), {})
+    ran: dict[str, Any] = {}
+    exec(wrap("_result_ = dict(name='Pad')"), ran)
+    assert ran["_freecad_mcp_result"] == '{"name": "Pad"}'
 
 
 def test_find_result_reads_the_marked_line() -> None:
