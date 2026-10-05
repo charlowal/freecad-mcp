@@ -595,13 +595,18 @@ def _circle_at(view, point, radius=None, tol=0.01):
 
 
 TEXT_HEIGHT = 3.5
-_NOTE_RISE = 1.35  # TechDraw draws a note's text this many text heights above its Y
+
+
+def _note_rise(lines):
+    # How far above its Y TechDraw centres a note of so many lines, in text heights
+    return 1.35 + 0.274 * (lines - 1)
 
 
 def _text_box(text, x, y, size=TEXT_HEIGHT):
+    # Measured on TechDraw's own render: 0.66 size per character, lines 2.13 sizes apart
     lines = text.split("\n")
-    w = 0.62 * size * max(len(line) for line in lines)
-    h = 1.6 * size * len(lines)
+    w = 0.66 * size * max(len(line) for line in lines)
+    h = (1.6 + 2.13 * (len(lines) - 1)) * size
     return [x - w / 2, y - h / 2, x + w / 2, y + h / 2]
 
 
@@ -702,7 +707,7 @@ def _note_boxes(page):
                 found.append((v.Name, [x - 4.5, y - 4.5, x + 4.5, y + 4.5]))
             elif v.isDerivedFrom("TechDraw::DrawViewAnnotation"):
                 size = _num(v.TextSize)
-                found.append((v.Name, _text_box("\n".join(v.Text), _num(v.X), _num(v.Y) + _NOTE_RISE * size, size)))
+                found.append((v.Name, _text_box("\n".join(v.Text), _num(v.X), _num(v.Y) + _note_rise(len(v.Text)) * size, size)))
             elif v.isDerivedFrom("TechDraw::DrawLeaderLine") and v.LeaderParent is not None and v.WayPoints:
                 # Start in unscaled view units, waypoints in sheet mm counted downwards
                 ox, oy = _origin(v.LeaderParent)
@@ -1322,7 +1327,7 @@ caption = doc.addObject("TechDraw::DrawViewAnnotation", "SectionCaption")
 page.addView(caption)
 caption.Text = [section.Label] + ([_scale_text(section.getScale())] if abs(section.getScale() - base.getScale()) > 1e-9 else [])
 caption.TextSize = TEXT_HEIGHT
-caption.X, caption.Y = (box[0] + box[2]) / 2, box[1] - 4 - _NOTE_RISE * TEXT_HEIGHT
+caption.X, caption.Y = (box[0] + box[2]) / 2, box[1] - 4 - _note_rise(len(caption.Text)) * TEXT_HEIGHT
 doc.recompute()
 _verification = dict(cut_area=round(cut_area, 6), lines=len(_elements(section, "Edge")))
 _result_ = dict(name=section.Name, caption=caption.Name, label=section.Label, box=box,
