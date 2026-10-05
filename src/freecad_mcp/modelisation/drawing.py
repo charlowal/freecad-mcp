@@ -40,24 +40,28 @@ STANDARD_SCALES = (10.0, 5.0, 4.0, 2.0, 1.0, 0.5, 0.25, 0.2, 0.1, 0.05, 0.02, 0.
 PROJECTIONS = ("Front", "Left", "Right", "Rear", "Top", "Bottom",
                "FrontTopLeft", "FrontTopRight", "FrontBottomLeft", "FrontBottomRight")
 
-# Title-block fields of FreeCAD's ASME templates, by the names the tools use
+# Title-block fields by the names the tools use, then the template field each
+# one is called in FreeCAD's ASME templates: ANSI A and B first, ANSI C, D and E second
 TITLE_FIELDS = {
-    "title": "DrawingTitle1",
-    "title_2": "DrawingTitle2",
-    "title_3": "DrawingTitle3",
-    "drawing_number": "drawing_number",
-    "revision": "revision_index",
-    "drawn_by": "DrawnBy",
-    "checked_by": "CheckedBy",
-    "approved_1": "Approved1",
-    "approved_2": "Approved2",
-    "company": "CompanyName",
-    "company_address": "CompanyAddress",
-    "code": "Code",
-    "weight": "Weight",
-    "scale": "scale",
-    "sheet": "Sheet",
+    "title": ["DrawingTitle1", "Title"],
+    "title_2": ["DrawingTitle2", "Subtitle"],
+    "title_3": ["DrawingTitle3"],
+    "drawing_number": ["drawing_number", "DrawingNumber"],
+    "revision": ["revision_index", "Revision"],
+    "drawn_by": ["DrawnBy", "AuthorName"],
+    "checked_by": ["CheckedBy", "SupervisorName"],
+    "approved_1": ["Approved1"],
+    "approved_2": ["Approved2"],
+    "company": ["CompanyName", "Company_name"],
+    "company_address": ["CompanyAddress"],
+    "code": ["Code"],
+    "weight": ["Weight"],
+    "scale": ["scale", "Scale"],
+    "sheet": ["Sheet", "SheetNumber"],
+    "date": ["CreationDate", "Date"],
 }
+# Unknown values of these read "À RENSEIGNER"; other fields stay empty
+_IDENTITY_FIELDS = ("title", "drawing_number", "drawn_by", "company", "weight")
 
 # ---------------------------------------------------------------------------
 # Shared functions: tested here, and sent to FreeCAD inside every script.
@@ -97,8 +101,15 @@ def _tolerance_text(spec, decimals, inch):
     minus = minus or 0.0
     if abs(plus + minus) < 1e-12:
         return " ±" + _fmt(abs(plus) * k, decimals, lead)
-    up = ("+" if plus >= 0 else "-") + _fmt(abs(plus) * k, decimals, lead)
-    down = ("-" if minus <= 0 else "+") + _fmt(abs(minus) * k, decimals, lead)
+
+    def deviation(value, sign):
+        # Metric: a nil deviation is a single 0 without sign; inch keeps its decimals and sign
+        if abs(value) < 1e-12 and not inch:
+            return "0"
+        return sign + _fmt(abs(value) * k, decimals, lead)
+
+    up = deviation(plus, "+" if plus >= 0 else "-")
+    down = deviation(minus, "-" if minus <= 0 else "+")
     return " " + up + "/" + down
 
 
@@ -120,7 +131,7 @@ def _dual_text(spec, value):
 
 
 def _hole_text(hole, count, spec):
-    """Hole callout, one line per stage: "2X ⌀11 [.433] THRU" then ⌴ or ⌵."""
+    """Hole callout, one line per stage: "2X ⌀11 [.433] THRU" then ⌴ or ⌵, then any note."""
     plain = dict(spec)
     for key in ("prefix", "suffix", "plus", "minus", "decimals_mm"):
         plain.pop(key, None)
@@ -136,37 +147,134 @@ def _hole_text(hole, count, spec):
     if hole.get("csink_diameter"):
         angle = hole["csink_angle"]
         lines.append("⌵ ⌀" + size(hole["csink_diameter"]) + " X " + _fmt(angle, _decimals(angle, 1)) + "°")
+    if spec.get("note"):
+        lines.append(spec["note"])
     return "\n".join(lines)
 
 
 def _template_areas(svg, width, height):
     """Inner frame and title block of a template, in page mm (y up).
 
-    FreeCAD's ASME templates draw the inner frame as their second-largest
-    rectangle, and the title block as the largest rectangle sitting in the
-    frame's bottom-right corner. Other templates get 10 mm margins and no
-    title block.
+    The frame is the innermost of the long border lines drawn near the
+    sheet's edges, whatever draws them (rect, line or path, inside any
+    transformed group). The title block is the box, closed by drawn lines,
+    around the template's editable texts in the frame's lower half. A
+    template with neither gets 10 mm margins and no title block.
     """
-    rects = []
-    for match in re.finditer(r"<rect\b([^>]*)>", svg):
-        attrs = match.group(1)
-        values = []
-        for key in ("x", "y", "width", "height"):
-            found = re.search(r"\s" + key + r'="([-\d.]+)"', attrs)
-            values.append(float(found.group(1)) if found else None)
-        if None not in values:
-            rects.append(values)
-    rects.sort(key=lambda r: -r[2] * r[3])
-    big = [r for r in rects if r[2] * r[3] > 0.5 * width * height]
-    if not big:
+    import xml.etree.ElementTree as ET
+
+    def mul(a, b):
+        return (a[0]*b[0] + a[2]*b[1], a[1]*b[0] + a[3]*b[1], a[0]*b[2] + a[2]*b[3],
+                a[1]*b[2] + a[3]*b[3], a[0]*b[4] + a[2]*b[5] + a[4], a[1]*b[4] + a[3]*b[5] + a[5])
+
+    def matrix(text):
+        m = (1, 0, 0, 1, 0, 0)
+        for kind, args in re.findall(r"(matrix|translate|scale|rotate)\s*\(([^)]*)\)", text or ""):
+            v = [float(x) for x in re.split(r"[\s,]+", args.strip()) if x]
+            if kind == "matrix" and len(v) == 6:
+                t = tuple(v)
+            elif kind == "translate":
+                t = (1, 0, 0, 1, v[0], v[1] if len(v) > 1 else 0)
+            elif kind == "scale":
+                t = (v[0], 0, 0, v[-1], 0, 0)
+            else:
+                a = math.radians(v[0]); c, s = math.cos(a), math.sin(a)
+                t = (c, s, -s, c, 0, 0)
+                if len(v) == 3:
+                    t = mul(mul((1, 0, 0, 1, v[1], v[2]), t), (1, 0, 0, 1, -v[1], -v[2]))
+            m = mul(m, t)
+        return m
+
+    def apply(m, x, y):
+        return m[0]*x + m[2]*y + m[4], m[1]*x + m[3]*y + m[5]
+
+    try:
+        root = ET.fromstring(svg)
+    except Exception:
         return dict(frame=[10.0, 10.0, width - 10.0, height - 10.0], title_block=None, source="default margins")
-    fx, fy, fw, fh = big[1] if len(big) > 1 else big[0]
-    frame = [fx, height - fy - fh, fx + fw, height - fy]
+    vb = [float(v) for v in re.split(r"[\s,]+", (root.get("viewBox") or "").strip()) if v]
+    base = (width / vb[2], 0, 0, height / vb[3], -vb[0] * width / vb[2], -vb[1] * height / vb[3]) if len(vb) == 4 and vb[2] and vb[3] else (1, 0, 0, 1, 0, 0)
+    segments, texts = [], []
+
+    def walk(node, m):
+        m = mul(m, matrix(node.get("transform")))
+        tag = node.tag.split("}")[-1]
+        if tag == "rect":
+            try:
+                x, y, w, h = (float(node.get(k)) for k in ("x", "y", "width", "height"))
+                pts = [apply(m, *p) for p in ((x, y), (x + w, y), (x + w, y + h), (x, y + h), (x, y))]
+                segments.extend(zip(pts, pts[1:]))
+            except (TypeError, ValueError):
+                pass
+        elif tag == "line":
+            try:
+                segments.append((apply(m, float(node.get("x1")), float(node.get("y1"))),
+                                 apply(m, float(node.get("x2")), float(node.get("y2")))))
+            except (TypeError, ValueError):
+                pass
+        elif tag == "path":
+            x = y = sx = sy = 0.0
+            for cmd, args in re.findall(r"([MmLlHhVvZzCcSsQqTtAa])([^MmLlHhVvZzCcSsQqTtAa]*)", node.get("d") or ""):
+                v = [float(n) for n in re.findall(r"-?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?", args)]
+                rel = cmd.islower()
+                c = cmd.upper()
+                if c == "Z":
+                    segments.append((apply(m, x, y), apply(m, sx, sy)))
+                    x, y = sx, sy
+                    continue
+                step = {"M": 2, "L": 2, "H": 1, "V": 1, "C": 6, "S": 4, "Q": 4, "T": 2, "A": 7}[c]
+                for i in range(0, len(v) - step + 1, step):
+                    a = v[i:i + step]
+                    if c == "H":
+                        nx, ny = (x + a[0] if rel else a[0]), y
+                    elif c == "V":
+                        nx, ny = x, (y + a[0] if rel else a[0])
+                    else:
+                        nx, ny = (x + a[-2], y + a[-1]) if rel else (a[-2], a[-1])
+                    if c == "M" and i == 0:
+                        sx, sy = nx, ny
+                    elif c in ("L", "H", "V") or (c == "M" and i > 0):
+                        segments.append((apply(m, x, y), apply(m, nx, ny)))
+                    x, y = nx, ny
+        elif tag == "text" and any(k.endswith("editable") for k in node.attrib):
+            try:
+                texts.append(apply(m, float(node.get("x", 0)), float(node.get("y", 0))))
+            except ValueError:
+                pass
+        for child in node:
+            walk(child, m)
+
+    walk(root, base)
+    horiz = [(min(a[0], b[0]), max(a[0], b[0]), a[1]) for a, b in segments
+             if abs(a[1] - b[1]) < 0.05 and abs(a[0] - b[0]) > 0.6 * width]
+    vert = [(min(a[1], b[1]), max(a[1], b[1]), a[0]) for a, b in segments
+            if abs(a[0] - b[0]) < 0.05 and abs(a[1] - b[1]) > 0.6 * height]
+    # Borders run close to the sheet's edges; a title block's top line is further in
+    tops = [s[2] for s in horiz if s[2] < 0.12 * height]
+    bottoms = [s[2] for s in horiz if s[2] > 0.88 * height]
+    lefts = [s[2] for s in vert if s[2] < 0.12 * width]
+    rights = [s[2] for s in vert if s[2] > 0.88 * width]
+    if not (tops and bottoms and lefts and rights):
+        return dict(frame=[10.0, 10.0, width - 10.0, height - 10.0], title_block=None, source="default margins")
+    # SVG y runs down: the inner frame is the innermost of the nested borders
+    fx0, fx1, fy_top, fy_bottom = max(lefts), min(rights), max(tops), min(bottoms)
+    frame = [fx0, height - fy_bottom, fx1, height - fy_top]
     block = None
-    for r in rects:
-        if r[2] * r[3] < fw * fh * 0.5 and abs(r[0] + r[2] - fx - fw) < 1.5 and abs(r[1] + r[3] - fy - fh) < 1.5:
-            block = [r[0], height - r[1] - r[3], r[0] + r[2], height - r[1]]
-            break
+    inside = [(x, y) for x, y in texts if fx0 < x < fx1 and (fy_top + fy_bottom) / 2 < y < fy_bottom]
+    if inside:
+        # Snap the box around the editable texts to the drawn lines that close it
+        tx0 = min(x for x, _ in inside); ty0 = min(y for _, y in inside)
+
+        def covers(lo, hi, a, b, share):
+            return min(hi, max(a, b)) - max(lo, min(a, b)) >= share * (hi - lo)
+
+        lefts_b = [a[0] for a, b in segments if abs(a[0] - b[0]) < 0.05 and fx0 + 1 < a[0] < tx0 - 0.5
+                   and covers(ty0, fy_bottom, a[1], b[1], 0.5)]
+        tops_b = [a[1] for a, b in segments if abs(a[1] - b[1]) < 0.05 and fy_top + 1 < a[1] < ty0 - 0.5
+                  and covers(tx0, fx1, a[0], b[0], 0.5)]
+        bx0 = min(lefts_b) if lefts_b else tx0 - 5
+        by_top = max(tops_b) if tops_b else ty0 - 8
+        block = [bx0, height - fy_bottom, fx1, height - by_top]
     return dict(frame=[round(v, 3) for v in frame], title_block=block and [round(v, 3) for v in block],
                 source="template frame")
 
@@ -610,6 +718,26 @@ def _note_boxes(page):
     return found
 
 
+def _field(texts, key, aliases):
+    # The template's own name for a title-block field, or None
+    for name in aliases.get(key, [key]):
+        if name in texts:
+            return name
+    return None
+
+
+def _resolve_fields(texts, wanted, aliases):
+    # {template field: value} for values given by short or template names
+    out, unknown = dict(), []
+    for key, value in wanted.items():
+        name = key if key in texts else _field(texts, key, aliases)
+        if name is None:
+            unknown.append(key)
+        else:
+            out[name] = value
+    return out, unknown
+
+
 def _store_spec(obj, spec):
     if "DualSpec" not in obj.PropertiesList:
         obj.addProperty("App::PropertyString", "DualSpec", "DualUnits", "How the dimension text is rebuilt from the geometry")
@@ -658,7 +786,20 @@ def _holes(objects, direction=None):
             stacks.setdefault(key, dict(axis=a, foot=foot, faces=[]))["faces"].append(
                 dict(kind=kind, span=u1 - u0, t0=min(ts), t1=max(ts), r=max(radii),
                      semi=getattr(surface, "SemiAngle", 0.0)))
+        clusters = []
         for stack in stacks.values():
+            # Holes on one axis through separate walls are separate holes: split where material ends
+            faces = sorted(stack["faces"], key=lambda f: f["t0"])
+            group, end = [], None
+            for face in faces:
+                if group and face["t0"] > end + 1e-4:
+                    clusters.append(dict(stack, faces=group))
+                    group = []
+                group.append(face)
+                end = face["t1"] if len(group) == 1 else max(end, face["t1"])
+            if group:
+                clusters.append(dict(stack, faces=group))
+        for stack in clusters:
             a, foot, faces = stack["axis"], stack["foot"], stack["faces"]
             cylinders = dict()
             for face in faces:
@@ -962,24 +1103,23 @@ template = doc.addObject("TechDraw::DrawSVGTemplate", page.Name + "_Template")
 template.Template = path
 page.Template = template
 texts = dict(template.EditableTexts)
-fields = _args["fields"]
-unknown = sorted(k for k in fields if k not in texts)
+aliases = _args["aliases"]
+fields, unknown = _resolve_fields(texts, _args["fields"], aliases)
 if unknown:
     _remove(page.Name, template.Name)
-    raise ValueError("Fields not in this template: " + ", ".join(unknown) + ". Its fields: " + ", ".join(sorted(texts)))
+    raise ValueError("Fields not in this template: " + ", ".join(sorted(unknown)) + ". Its fields: " + ", ".join(sorted(texts)))
+defaults = dict()
+for key in _args["identity"]:
+    name = _field(texts, key, aliases)
+    if name:
+        defaults[name] = PLACEHOLDER
+for key, value in (("checked_by", TO_CHECK), ("approved_1", ""), ("approved_2", ""), ("sheet", "1 / 1"),
+                   ("revision", "?")):  # "?": the revision box is too narrow for the placeholder
+    name = _field(texts, key, aliases)
+    if name:
+        defaults[name] = value
 for key in texts:
-    if key in fields:
-        texts[key] = fields[key]
-    elif key in ("Approved1", "Approved2"):
-        texts[key] = ""
-    elif key == "CheckedBy":
-        texts[key] = TO_CHECK
-    elif key == "Sheet":
-        texts[key] = "1 / 1"
-    elif key == "revision_index":
-        texts[key] = "?"  # the box is too narrow for the placeholder
-    else:
-        texts[key] = PLACEHOLDER
+    texts[key] = fields.get(key, defaults.get(key, ""))
 template.EditableTexts = texts
 doc.recompute()
 sheet = _sheet(page)
@@ -991,10 +1131,9 @@ _FILL_TITLE_BLOCK = r'''
 page = _page(_args["page_name"])
 template = page.Template
 texts = dict(template.EditableTexts)
-fields = _args["fields"]
-unknown = sorted(k for k in fields if k not in texts)
-if unknown:
-    raise ValueError("Fields not in this template: " + ", ".join(unknown) + ". Its fields: " + ", ".join(sorted(texts)))
+fields, unknown = _resolve_fields(texts, _args["fields"], _args["aliases"])
+if unknown and not _args.get("lenient"):
+    raise ValueError("Fields not in this template: " + ", ".join(sorted(unknown)) + ". Its fields: " + ", ".join(sorted(texts)))
 texts.update(fields)
 template.EditableTexts = texts
 doc.recompute()
@@ -1294,6 +1433,19 @@ else:
         if not _blocked(_linear(other)):
             side = other
             spot = _linear(side)
+    # A text wider than the gap between extension lines goes beyond them,
+    # on the side where it touches no other note
+    span = expected * s
+    outside = []
+    if kind == "horizontal" and 2 * half_text + 8 > span:
+        outside = [(mid[0] + d * (span / 2 + 4 + half_text), spot[1]) for d in (1, -1)]
+    elif kind == "vertical" and 1.6 * TEXT_HEIGHT + 8 > span:
+        outside = [(spot[0], mid[1] + d * (span / 2 + 4 + 0.8 * TEXT_HEIGHT)) for d in (1, -1)]
+    if outside:
+        ox_, oy_ = _origin(view)
+        others = [b for n, b in _note_boxes(page) if n.split(":")[0] != dim.Name] + [b for n, b in _boxes(page) if n != view.Name]
+        clear = [c for c in outside if not any(_overlap(_text_box(text, ox_ + c[0], oy_ + c[1]), b, 1.0) for b in others)]
+        spot = (clear or outside)[0]
     dim.X, dim.Y = spot
 spec["side"] = side
 _store_spec(dim, spec)
@@ -1351,7 +1503,7 @@ for h in holes:
             break
     else:
         groups.append(dict(signature=sig, holes=[h]))
-spec = dict(dual=_args["dual"], decimals_in=_args["decimals_in"], kind="hole")
+spec = dict(dual=_args["dual"], decimals_in=_args["decimals_in"], kind="hole", note=_args.get("note") or "")
 made, missed = [], []
 s = view.getScale()
 for g in groups:
@@ -1580,15 +1732,16 @@ d = V(*view.Direction)
 made = []
 sheet = _sheet(page)
 gx, gy = _origin(view)
+taken = [b for _, b in _boxes(page)] + [b for _, b in _note_boxes(page)]
+if sheet["title_block"]:
+    taken.append(sheet["title_block"])
+plan = []
 for item in _args["items"]:
     o = _obj(item["objects"][0])
     target, seen = _visible_point(view, o)
     ox, oy = _to_view(view, target)
     start = math.atan2(oy - cy, ox - cx) if math.hypot(ox - cx, oy - cy) > 1e-6 else math.pi / 4
     half = math.hypot(x1 - x0, y1 - y0) / 2 * s
-    taken = [b for _, b in _boxes(page)] + [b for _, b in _note_boxes(page)]
-    if sheet["title_block"]:
-        taken.append(sheet["title_block"])
     spot = None
     for ring in (0.0, 10.0, 20.0, 30.0):
         for k in (0, 1, -1, 2, -2, 3, -3, 4, -4, 5, -5, 6, -6):
@@ -1605,19 +1758,44 @@ for item in _args["items"]:
         f = sheet["frame"]
         spot = (min(max(gx + cx * s + half * math.cos(start), f[0] + 7), f[2] - 7),
                 min(max(gy + cy * s + half * math.sin(start), f[1] + 7), f[3] - 7))
+    taken.append([spot[0] - 5, spot[1] - 5, spot[0] + 5, spot[1] + 5])
+    plan.append(dict(item=item, obj=o, origin=(ox, oy), arrow=(gx + ox * s, gy + oy * s), spot=spot, seen=seen))
+
+
+def _cross(p1, p2, p3, p4):
+    def side(a, b, c):
+        return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+    return side(p3, p4, p1) * side(p3, p4, p2) < 0 and side(p1, p2, p3) * side(p1, p2, p4) < 0
+
+
+# Two crossing leaders swap their bubbles; each swap shortens the total, so it ends
+for _ in range(len(plan) * len(plan)):
+    swapped = False
+    for i in range(len(plan)):
+        for j in range(i + 1, len(plan)):
+            a, b = plan[i], plan[j]
+            if _cross(a["arrow"], a["spot"], b["arrow"], b["spot"]):
+                a["spot"], b["spot"] = b["spot"], a["spot"]
+                swapped = True
+    if not swapped:
+        break
+crossings = sum(1 for i in range(len(plan)) for j in range(i + 1, len(plan))
+                if _cross(plan[i]["arrow"], plan[i]["spot"], plan[j]["arrow"], plan[j]["spot"]))
+for entry in plan:
+    ox, oy = entry["origin"]
+    spot = entry["spot"]
     balloon = doc.addObject("TechDraw::DrawViewBalloon", "Balloon")
     balloon.SourceView = view
     # Unscaled view coordinates: TechDraw applies the view's scale
     balloon.OriginX, balloon.OriginY = ox, oy
     balloon.X, balloon.Y = (spot[0] - gx) / s, (spot[1] - gy) / s
-    balloon.Text = str(item["item"])
+    balloon.Text = str(entry["item"]["item"])
     page.addView(balloon)
-    doc.recompute()
-    made.append(dict(name=balloon.Name, item=item["item"], object=o.Name, points_at_visible_face=seen,
-                     bubble_at=[round(spot[0], 3), round(spot[1], 3)],
-                     arrow_at=[round(gx + ox * s, 3), round(gy + oy * s, 3)]))
+    made.append(dict(name=balloon.Name, item=entry["item"]["item"], object=entry["obj"].Name,
+                     points_at_visible_face=entry["seen"], bubble_at=[round(spot[0], 3), round(spot[1], 3)],
+                     arrow_at=[round(entry["arrow"][0], 3), round(entry["arrow"][1], 3)]))
 doc.recompute()
-_result_ = dict(balloons=made)
+_result_ = dict(balloons=made, crossing_leaders=crossings)
 '''
 
 _ADD_HOLE_TAGS = r'''
@@ -1790,12 +1968,19 @@ except Exception:
 defaults = [k for k, v in texts.items() if template_defaults.get(k) and v == template_defaults[k] and v.strip()]
 missing = [k for k, v in texts.items() if v.strip() in (PLACEHOLDER, "?")]
 approved = [k for k in ("Approved1", "Approved2") if texts.get(k, "").strip()]
+checker_field = next((k for k in ("CheckedBy", "SupervisorName") if k in texts), None)
+checker = texts.get(checker_field, "").strip() if checker_field else ""
 verdict("cartouche_sans_valeur_du_gabarit", "FAIL" if defaults else "PASS",
         ("template sample text left in: " + str(defaults)) if defaults else "no field keeps the template's sample text")
 verdict("cartouche_complet", "NON_VERIFIE" if missing else "PASS",
         ("to fill in by a person: " + ", ".join(missing)) if missing else "every field holds a value")
 verdict("approbation", "NON_VERIFIE" if approved else "PASS",
         ("approval fields filled (" + ", ".join(approved) + "): check that a person signed") if approved else "no approval: the drawing stays " + TO_CHECK)
+if checker_field:
+    named = checker not in ("", TO_CHECK, PLACEHOLDER, "?")
+    verdict("verifie_par", "NON_VERIFIE" if named else "PASS",
+            ("'Checked by' names " + repr(checker) + ": confirm that this person checked the drawing; a tool does not")
+            if named else "'Checked by' still reads " + repr(checker))
 
 # 6. Dimensions
 linear = [d for d in dims if d.Type in ("Distance", "DistanceX", "DistanceY", "Diameter", "Radius")]
@@ -1839,7 +2024,9 @@ for d in dims:
         stale.append(d.Name + ": " + str(error))
         continue
     recomputed += 1
-    if d.FormatSpec != want:
+    shown = d.FormatSpec
+    appended = spec.get("kind") == "hole" and shown.startswith(want) and shown[len(want):len(want) + 1] in (" ", "\n")
+    if shown != want and not appended:
         stale.append(d.Name + " shows " + repr(d.FormatSpec) + ", geometry gives " + repr(want))
 if recomputed or stale:
     verdict("valeurs_recalculees", "FAIL" if stale else "PASS", ("; ".join(stale)) if stale else str(recomputed) + " texts recomputed from the geometry, all equal")
@@ -1848,9 +2035,10 @@ else:
 commas = [d.Name for d in dims if re.search(r"\d,\d", d.getText() if hasattr(d, "getText") else d.FormatSpec)]
 verdict("separateur_decimal", "FAIL" if commas else "PASS", ("decimal comma in: " + str(commas)) if commas else "decimal point everywhere")
 
-# 7. Holes called out
+# 7. Holes called out. An assembly is judged on its main view group, so the
+# copies an exploded view is drawn from are not counted twice.
 sources = []
-for p in parts:
+for p in (list(groups[0].Views) if groups else parts):
     for o in _sources(p):
         if o not in sources:
             sources.append(o)
@@ -1872,7 +2060,11 @@ for d in dims:
                     callouts.add(key)
         except Exception:
             pass
-if not seen:
+solid_count = sum(1 for o in sources if not Part.getShape(o).isNull() and Part.getShape(o).Solids)
+assembly = solid_count > 1 and any(t.Source and t.Source.Name.startswith(_args["bom_sheet"]) for t in tables)
+if assembly:
+    verdict("percages_cotes", "NON_APPLICABLE", "assembly drawing with a parts list: holes are called out on the detail drawings")
+elif not seen:
     verdict("percages_cotes", "NON_APPLICABLE", "no hole found in the parts")
 else:
     left = sorted(set(seen) - callouts)
@@ -1963,9 +2155,11 @@ def register_drawing_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -
     ) -> dict[str, Any]:
         """Create a TechDraw sheet on a template and fill its title block.
 
-        Fields left out are written "À RENSEIGNER" (to be filled in by a
-        person), the approval fields stay empty and "Checked by" says
-        "À VÉRIFIER": a tool never invents or approves.
+        Title, number, drafter, company and weight left out read
+        "À RENSEIGNER" (to be filled in by a person); "Checked by" reads
+        "À VÉRIFIER", approvals and other fields stay empty: a tool never
+        invents, checks or approves. Short field names work on every ASME
+        template, whose sizes A-B and C-E name their fields differently.
 
         Args:
             template: An ASME template name (ANSIA_Landscape, ANSIB_Landscape,
@@ -1989,9 +2183,10 @@ def register_drawing_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -
         for key, value in (("title", title), ("drawing_number", drawing_number), ("revision", revision),
                            ("drawn_by", drawn_by), ("company", company)):
             if value is not None:
-                values[TITLE_FIELDS[key]] = value
+                values[key] = value
         return await run(_CREATE_PAGE, "Creating the drawing page failed", template=template,
-                         page_name=page_name, fields=values, doc_name=doc_name)
+                         page_name=page_name, fields=values, aliases=TITLE_FIELDS, identity=list(_IDENTITY_FIELDS),
+                         doc_name=doc_name)
 
     @mcp.tool()
     async def fill_title_block(page_name: str, fields: dict[str, str], doc_name: str | None = None) -> dict[str, Any]:
@@ -1999,18 +2194,17 @@ def register_drawing_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -
 
         Args:
             page_name: The drawing page.
-            fields: Values by template field name (DrawingTitle1,
-                drawing_number, revision_index, DrawnBy, CheckedBy,
-                CompanyName, Weight, scale, Sheet, ...), or by the short names
-                title, drawing_number, revision, drawn_by, company, weight.
+            fields: Values by the short names title, title_2, drawing_number,
+                revision, drawn_by, checked_by, company, weight, date, sheet,
+                which find the field under each template's own name, or by
+                template field name (DrawingTitle1, AuthorName, ...).
             doc_name: Document. Uses active document if None.
 
         Returns:
             Every field of the title block after the change.
         """
-        values = {TITLE_FIELDS.get(k, k): v for k, v in fields.items()}
         return await run(_FILL_TITLE_BLOCK, "Filling the title block failed", page_name=page_name,
-                         fields=values, doc_name=doc_name)
+                         fields=dict(fields), aliases=TITLE_FIELDS, doc_name=doc_name)
 
     @mcp.tool()
     async def add_drawing_views(
@@ -2022,7 +2216,7 @@ def register_drawing_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -
         projection: str = "Third angle",
         front_direction: list[float] | None = None,
         up_direction: list[float] | None = None,
-        hidden_lines: bool = True,
+        hidden_lines: bool = False,
         doc_name: str | None = None,
     ) -> dict[str, Any]:
         """Place orthographic views (and an isometric) of parts on a sheet.
@@ -2043,7 +2237,8 @@ def register_drawing_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -
                 view, default [0, -1, 0] (looking along +Y).
             up_direction: Model direction that points up in the front view,
                 default [0, 0, 1].
-            hidden_lines: Draw hidden lines dashed in the orthographic views.
+            hidden_lines: Draw hidden lines dashed in every orthographic view;
+                off by default, since they clutter all but simple parts.
             doc_name: Document. Uses active document if None.
 
         Returns:
@@ -2194,6 +2389,7 @@ def register_drawing_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -
         dual: bool = True,
         decimals_in: int = 3,
         offset: float = 8.0,
+        note: str | None = None,
         doc_name: str | None = None,
     ) -> dict[str, Any]:
         """Call out every hole seen end-on in a view, from the 3D geometry.
@@ -2209,6 +2405,8 @@ def register_drawing_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -
             dual: Show inches in brackets after mm.
             decimals_in: Inch decimals.
             offset: Leader length beyond the circle, in sheet mm.
+            note: A last line under every callout, e.g. "REAM 3/16 IN"; the
+                checker keeps it when it recomputes the callout.
             doc_name: Document. Uses active document if None.
 
         Returns:
@@ -2217,7 +2415,7 @@ def register_drawing_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -
         """
         return await run(_ADD_HOLE_CALLOUTS, "Adding hole callouts failed", view_name=view_name,
                          object_names=object_names, dual=dual, decimals_in=decimals_in, offset=offset,
-                         doc_name=doc_name)
+                         note=note, doc_name=doc_name)
 
     @mcp.tool()
     async def add_hole_table(
@@ -2420,7 +2618,8 @@ def register_drawing_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -
             doc_name: Document. Uses active document if None.
 
         Returns:
-            The items (number, quantity, parts), the table and the balloons.
+            The items (number, quantity, parts), the table, the balloons and
+            how many of their leaders still cross (0 once untangled).
         """
         items = await bom_items(object_names, doc_name)
         if not items:
@@ -2430,13 +2629,14 @@ def register_drawing_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -
                           columns=[("ITEM", 50), ("QTY", 50), ("PART NUMBER", 150), ("DESCRIPTION", 190),
                                    ("MATERIAL", 150)],
                           sheet_name="PartsList", where="above_title_block", doc_name=doc_name)
-        made = []
+        made, crossings = [], 0
         if balloons:
             if not view_name:
                 raise ValueError("Give view_name for the balloons, or balloons=False")
-            made = (await run(_ADD_BALLOONS, "Adding the balloons failed", view_name=view_name, items=items,
-                              offset=12.0, doc_name=doc_name))["balloons"]
-        return {"items": items, "table": table, "balloons": made}
+            placed = await run(_ADD_BALLOONS, "Adding the balloons failed", view_name=view_name, items=items,
+                               offset=12.0, doc_name=doc_name)
+            made, crossings = placed["balloons"], placed["crossing_leaders"]
+        return {"items": items, "table": table, "balloons": made, "crossing_leaders": crossings}
 
     @mcp.tool()
     async def add_revision_table(
@@ -2468,7 +2668,7 @@ def register_drawing_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -
                           columns=[("ZONE", 50), ("REV", 45), ("DESCRIPTION", 260), ("DATE", 90), ("APPROVED", 90)],
                           sheet_name="Revisions", where="top_right", doc_name=doc_name)
         await run(_FILL_TITLE_BLOCK, "Setting the revision failed", page_name=page_name,
-                  fields={"revision_index": revisions[-1]["rev"]}, doc_name=doc_name)
+                  fields={"revision": revisions[-1]["rev"]}, aliases=TITLE_FIELDS, lenient=True, doc_name=doc_name)
         return {**table, "revision": revisions[-1]["rev"]}
 
     @mcp.tool()

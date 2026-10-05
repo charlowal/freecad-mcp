@@ -36,7 +36,8 @@ from test_modelisation import RecordingBridge, _modelling_tools
         (25.4, {}, "25.4 [1.000]"),
         (120.0, {"plus": 0.1, "minus": -0.1}, "120.0 ±0.1 [4.724 ±.004]"),
         (50.0, {"plus": 0.2, "minus": -0.1}, "50.0 +0.2/-0.1 [1.969 +.008/-.004]"),
-        (50.0, {"plus": 0.0, "minus": -0.05}, "50.00 +0.00/-0.05 [1.969 +.000/-.002]"),
+        (50.0, {"plus": 0.0, "minus": -0.05}, "50.00 0/-0.05 [1.969 +.000/-.002]"),
+        (34.8, {"plus": 0.3, "minus": 0.0}, "34.8 +0.3/0 [1.370 +.012/-.000]"),
         (120.0, {"dual": False}, "120"),
         (120.0, {"decimals_mm": 2, "decimals_in": 4}, "120.00 [4.7244]"),
         (11.0, {"prefix": "2X ⌀", "suffix": " THRU"}, "2X ⌀11 [.433] THRU"),
@@ -74,6 +75,11 @@ def test_hole_callout_text(hole: dict, count: int, text: str) -> None:
     assert _hole_text(hole, count, {"dual": True, "decimals_in": 3}) == text
 
 
+def test_hole_callout_note_is_its_last_line() -> None:
+    spec = {"dual": True, "decimals_in": 3, "note": "REAM 3/16 IN"}
+    assert _hole_text({"diameter": 4.9, "through": True}, 4, spec) == "4X ⌀4.9 [.193] THRU\nREAM 3/16 IN"
+
+
 def test_hole_callout_ignores_a_dimension_prefix_and_tolerance() -> None:
     spec = {"dual": True, "decimals_in": 3, "prefix": "X", "plus": 0.1, "minus": -0.1}
     assert _hole_text({"diameter": 11.0, "through": True}, 1, spec) == "⌀11 [.433] THRU"
@@ -84,11 +90,25 @@ def test_scale_text(scale: float, text: str) -> None:
     assert _scale_text(scale) == text
 
 
-ANSI_B = """<svg width="431.8mm" height="279.4mm" viewBox="0 0 431.8 279.4">
+ANSI_B = """<svg xmlns="http://www.w3.org/2000/svg" xmlns:freecad="https://www.freecad.org/wiki/index.php?title=Svg_Namespace"
+ width="431.8mm" height="279.4mm" viewBox="0 0 431.8 279.4">
 <rect id="rectOutline" x="12.5" y="6.6" width="406.8" height="266.2"/>
 <rect id="frame" x="19.979" y="20.179" width="391.84" height="239.04"/>
 <rect id="block" x="264.98" y="210.95" width="146.66" height="48.074"/>
 <rect id="cell" x="264.98" y="250" width="40" height="9.019"/>
+<text freecad:editable="DrawingTitle1" x="300" y="230">TITLE</text>
+<text freecad:editable="DrawnBy" x="270" y="255">ME</text>
+</svg>"""
+
+# The larger ASME sheets draw their borders as paths inside a transformed group
+ANSI_D_PATHS = """<svg xmlns="http://www.w3.org/2000/svg" xmlns:freecad="https://www.freecad.org/wiki/index.php?title=Svg_Namespace"
+ width="864" height="559" viewBox="0 0 432 279.5">
+<g transform="scale(0.5)">
+<path d="M10 10 H854 V549 H10 Z"/>
+<path d="m20 20h824v519h-824z"/>
+<path d="M690 470 V539 M690 470 H844"/>
+<text freecad:editable="DrawingTitle1" x="760" y="500">TITLE</text>
+</g>
 </svg>"""
 
 
@@ -96,7 +116,31 @@ def test_template_areas_find_the_frame_and_the_title_block() -> None:
     areas = _template_areas(ANSI_B, 431.8, 279.4)
     assert areas["source"] == "template frame"
     assert areas["frame"] == [19.979, 20.181, 411.819, 259.221]
-    assert areas["title_block"] == [264.98, 20.376, 411.64, 68.45]
+    assert areas["title_block"] == [264.98, 20.181, 411.819, 68.45]
+
+
+def test_template_areas_read_paths_in_transformed_groups() -> None:
+    areas = _template_areas(ANSI_D_PATHS, 864.0, 559.0)
+    assert areas["frame"] == [20.0, 20.0, 844.0, 539.0]
+    assert areas["title_block"] == [690.0, 20.0, 844.0, 89.0]
+
+
+@pytest.mark.parametrize("name", ["ANSIA_Landscape", "ANSIB_Landscape", "ANSIC_Landscape", "ANSID_Landscape",
+                                  "ANSIE_Landscape", "ANSIB_Portrait", "ANSID_Portrait"])
+def test_every_asme_template_gives_a_frame_and_a_title_block(name: str) -> None:
+    import os
+    path = f"/snap/freecad/current/usr/share/Mod/TechDraw/Templates/ASME/{name}.svg"
+    if not os.path.exists(path):
+        pytest.skip("FreeCAD's templates are not installed here")
+    svg = open(path, encoding="utf-8").read()
+    w = float(re.search(r'<svg[^>]*\swidth="([\d.]+)', svg).group(1))
+    h = float(re.search(r'<svg[^>]*\sheight="([\d.]+)', svg).group(1))
+    areas = _template_areas(svg, w, h)
+    f, b = areas["frame"], areas["title_block"]
+    assert areas["source"] == "template frame"
+    assert 5 < f[0] < 0.1 * w and f[2] > 0.9 * w and 5 < f[1] < 0.1 * h and f[3] > 0.9 * h
+    # The title block sits in the frame's bottom-right corner
+    assert b and b[1] == f[1] and b[2] == f[2] and b[0] > f[0] + 40 and 30 < b[3] - b[1] < 90
 
 
 def test_template_without_frame_gets_default_margins() -> None:

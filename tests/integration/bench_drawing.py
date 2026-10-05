@@ -323,6 +323,19 @@ async def bench_dimensions(doc: str, page: str, views: dict) -> list[str]:
     refused("dims", "basic with tolerance refused", ok, r, "basic dimension carries no tolerance", count_views(doc, page) == n)
     ok, r = await call("add_dimension", view_name=top, kind="diameter", center=[60, 40, 10], doc_name=doc)
     refused("dims", "no circle there refused", ok, r, "No circle", count_views(doc, page) == n)
+    # The gusset is 10 mm thick, 5 mm on the sheet: its text must go beyond the extension lines
+    ok, r = await call("add_dimension", view_name=front, kind="horizontal", points=[[55, 0, 70], [65, 0, 70]],
+                       tolerance=0.1, side="above", doc_name=doc)
+    if ok:
+        got = q(f"""
+_d = App.getDocument({doc!r}); _o = _d.getObject({r['name']!r}); _v = _d.getObject({front!r})
+R = dict(x=_o.X.Value, s=_v.getScale(), text=_o.FormatSpec)
+""")
+        right_line = 10 * got["s"] / 2  # gusset x 55..65 is -5..5 in the view, the right line at +5 scaled
+        judge("dims", "narrow dimension: text outside", ok, r, abs(got["x"]) > right_line + 4 and got["text"] == "10.0 ±0.1 [.394 ±.004]",
+              f"text centre {round(got['x'], 1)} mm from the view centre, extension lines at ±{right_line}", json.dumps(got))
+    else:
+        note("dims", "narrow dimension: text outside", "ERROR", r)
     return made
 
 
@@ -363,6 +376,24 @@ R = dict(tags=sorted(o.Text[0] for o in _d.Objects if o.isDerivedFrom("TechDraw:
               f"tags {got['tags']}, first rows {got['rows'][:2]}", json.dumps(got))
     else:
         note("holes", "hole table, 5 holes tagged", "ERROR", r)
+    # Two cheeks drilled on one axis are two holes, not one
+    q(f"""
+import Part
+_d = App.getDocument({doc!r}); V = App.Vector
+u = Part.makeBox(60, 20, 5).fuse(Part.makeBox(5, 20, 30)).fuse(Part.makeBox(5, 20, 30, V(55, 0, 0))).removeSplitter()
+u = u.cut(Part.makeCylinder(2.5, 70, V(-5, 10, 20), V(1, 0, 0)))
+_d.addObject("Part::Feature", "Clevis").Shape = u
+_d.recompute(); R = True
+""")
+    ok, cpage = await call("create_drawing_page", page_name="ClevisSheet", doc_name=doc)
+    ok, cviews = await call("add_drawing_views", page_name=cpage["page"], object_names=["Clevis"], views=["Front", "Right"],
+                            isometric=False, doc_name=doc)
+    ok, r = await call("add_hole_callouts", view_name=cviews["views"]["Right"], note="REAM", doc_name=doc) if ok else (False, cviews)
+    if ok:
+        texts = [c["text"] for c in r["callouts"]]
+        judge("holes", "coaxial holes in two walls: 2X", ok, r, texts == ["2X ⌀5 [.197] THRU\nREAM"], f"callouts {texts}", f"callouts {texts}")
+    else:
+        note("holes", "coaxial holes in two walls: 2X", "ERROR", r)
     rep = await call("check_drawing", page_name=page["page"], doc_name=doc)
     if rep[0]:
         judge("holes", "check: every hole called out", True, rep[1], check_of(rep[1], "percages_cotes") == "PASS",
@@ -472,7 +503,9 @@ R = dict(rows=[[_t.getContents(c + str(i)).lstrip("'") for c in "ABCE"] for i in
 """)
         cond = got["balloons"] == ["1", "2", "3"] and [row[1] for row in got["rows"]] == ["1", "1", "1"] \
             and [row[2] for row in got["rows"]] == ["BasePlate", "Web", "Gusset"] and all(row[3] == "À RENSEIGNER" for row in got["rows"])
-        judge("annot", "parts list and balloons", ok, r, cond, f"rows {got['rows']}, balloons {got['balloons']}", json.dumps(got))
+        cond = cond and r.get("crossing_leaders") == 0
+        judge("annot", "parts list and balloons", ok, r, cond,
+              f"rows {got['rows']}, balloons {got['balloons']}, crossing leaders {r.get('crossing_leaders')}", json.dumps(got))
         EXPECT["balloons"] += [(str(b["item"]), b["bubble_at"]) for b in r["balloons"]]
     else:
         note("annot", "parts list and balloons", "ERROR", r)
@@ -480,6 +513,72 @@ R = dict(rows=[[_t.getContents(c + str(i)).lstrip("'") for c in "ABCE"] for i in
                        doc_name=doc)
     got = q(f"R = App.getDocument({doc!r}).getObject({page!r}).Template.EditableTexts['revision_index']")
     judge("annot", "revision block, title block rev", ok, r, got == "A", f"revision_index {got!r}, table {r.get('box') if ok else ''}", repr(got))
+
+
+async def bench_templates(doc: str) -> None:
+    """ANSI C/D/E draw their borders as paths: the frame and title block must still be found."""
+    close(doc)
+    q(f"App.newDocument({doc!r}); R = True")
+    # Measured on the GL-001 sheet rendered from ANSID_Landscape (PNG at 2000 px for 864 mm)
+    ok, r = await call("create_drawing_page", template="ANSID_Landscape", doc_name=doc)
+    if ok:
+        f, b = r["frame"], r["title_block"]
+        cond = (all(abs(x - y) < 1.5 for x, y in zip(f, [20.7, 19.0, 843.0, 540.0])) and b is not None
+                and abs(b[0] - 689.0) < 2.5 and abs(b[3] - 69.0) < 2.5)
+        judge("sheet", "ANSI D frame and title block", ok, r, cond, f"frame {f}, block {b}", f"frame {f}, block {b}")
+    else:
+        note("sheet", "ANSI D frame and title block", "ERROR", r)
+    close(doc)
+
+
+async def bench_assembly(doc: str) -> None:
+    """An exploded view drawn from moved copies must not double the parts or ask for hole callouts."""
+    make_bracket(doc)
+    q(f"""
+_d = App.getDocument({doc!r})
+for _n, _dz in (("BasePlate", 0), ("Web", 40), ("Gusset", 80)):
+    _c = _d.addObject("Part::Feature", _n + "_Exploded")
+    _sh = _d.getObject(_n).Shape.copy(); _sh.translate(App.Vector(0, 0, _dz)); _c.Shape = _sh
+    _c.Label = _n
+_d.recompute(); R = True
+""")
+    ok, page = await call("create_drawing_page", template="ANSIC_Landscape", title="ASSEMBLY", doc_name=doc)
+    if not ok:
+        note("check", "assembly with exploded copies", "ERROR", page)
+        close(doc)
+        return
+    got = q(f"R = dict(App.getDocument({doc!r}).getObject({page['page']!r}).Template.EditableTexts)")
+    judge("sheet", "ANSI C short field names", True, got, got.get("Title") == "ASSEMBLY" and got.get("SupervisorName") == "À VÉRIFIER"
+          and got.get("AuthorName") == "À RENSEIGNER" and got.get("COPYRIGHT") == "",
+          "Title, SupervisorName and AuthorName found under ANSI C's own names", json.dumps(got)[:220])
+    ok, views = await call("add_drawing_views", page_name=page["page"], object_names=["BasePlate", "Web", "Gusset"],
+                           isometric=False, doc_name=doc)
+    q(f"""
+_d = App.getDocument({doc!r}); _p = _d.getObject({page['page']!r})
+_v = _d.addObject("TechDraw::DrawViewPart", "Exploded"); _p.addView(_v)
+_v.Source = [_d.getObject(n) for n in ("BasePlate_Exploded", "Web_Exploded", "Gusset_Exploded")]
+_v.Direction = App.Vector(1, -1, 1); _v.XDirection = App.Vector(1, 1, 0); _v.ScaleType = "Custom"; _v.Scale = 0.5
+_v.X, _v.Y = 420, 300
+_d.recompute(); R = True
+""")
+    ok, r = await call("add_parts_list", page_name=page["page"], object_names=["BasePlate_Exploded", "Web_Exploded", "Gusset_Exploded"],
+                       view_name="Exploded", doc_name=doc)
+    ok2, report = await call("check_drawing", page_name=page["page"], doc_name=doc)
+    if ok and ok2:
+        cond = (check_of(report, "percages_cotes") == "NON_APPLICABLE" and check_of(report, "nomenclature") == "PASS"
+                and check_of(report, "cartouche_libre") == "PASS")
+        judge("check", "assembly with exploded copies", True, report, cond,
+              "holes left to the detail drawings, 3 items for 3 parts, ANSI C title block found",
+              json.dumps([c for c in report["checks"] if c["check"] in ("percages_cotes", "nomenclature", "cartouche_libre")])[:240])
+        # Somebody's name under "Checked by" is not a check
+        await call("fill_title_block", page_name=page["page"], fields={"checked_by": "J. DOE"}, doc_name=doc)
+        ok3, named = await call("check_drawing", page_name=page["page"], doc_name=doc)
+        judge("check", "a name under Checked by is NON_VERIFIE", ok3, named,
+              ok3 and check_of(named, "verifie_par") == "NON_VERIFIE", "verifie_par NON_VERIFIE for 'J. DOE'",
+              check_of(named, "verifie_par") if ok3 else "")
+    else:
+        note("check", "assembly with exploded copies", "ERROR", r if not ok else report)
+    close(doc)
 
 
 async def bench_export_and_check(doc: str, page: str, views: dict) -> None:
@@ -588,6 +687,8 @@ async def main() -> None:
         await bench_annotations(doc, sheet["page"], views)
         await bench_export_and_check(doc, sheet["page"], views)
     close(doc)
+    await bench_templates("BenchDrawTemplates")
+    await bench_assembly("BenchDrawAssembly")
     await bench_holes("BenchDrawHoles")
     await bench_refresh("BenchDrawRefresh")
     await bench_one_shot("BenchDrawAuto")

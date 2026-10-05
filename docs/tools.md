@@ -75,8 +75,16 @@ so the text is written from TechDraw's own measurement, which must equal the
 geometry's; `refresh_dual_dimensions` rewrites the texts after a model change.
 
 `add_hole_callouts` finds holes in the solids themselves (drill, THRU or ↧
-depth, ⌴ counterbore, ⌵ countersink; identical holes share "2X"), so imported
-STEP parts work too. Threads are not recognised. `add_gdt_frame` refuses
+depth, ⌴ counterbore, ⌵ countersink; identical holes share "2X", and holes on
+one axis through separate walls count apart), so imported STEP parts work
+too; `note` adds a last line such as "REAM 3/16 IN". Threads are not
+recognised.
+
+Title-block fields take short names (`title`, `drawing_number`, `revision`,
+`drawn_by`, `checked_by`, `company`, `weight`, `date`, `sheet`) that find the
+field on every ASME template, whose sizes A-B and C-E name it differently.
+The frame and title block are read from the template's drawn lines on every
+size. Views come without hidden lines unless `hidden_lines=True`. `add_gdt_frame` refuses
 frames that cannot be right, such as a datum on a form tolerance, an
 orientation tolerance without datum, or a modifier where none applies.
 
@@ -85,9 +93,11 @@ with the evidence: views drawn, inside the frame, off the title block and
 apart; dimensions and notes inside the frame; projection; scale field; title
 block without template sample text; every dimension tied to geometry, in dual
 units, its text recomputed from the geometry; decimal point; every hole called
-out; GD&T datums shown; parts list against balloons. What only a person can
+out (left to the detail drawings on an assembly with a parts list, judged on
+its main view group so an exploded view's copies are not counted twice);
+GD&T datums shown; parts list against balloons. What only a person can
 judge (complete dimensioning, conformity to a standard, whether a joint is
-welded) is NON_VERIFIE, never PASS. Nothing is approved: unknown title-block
+welded, a name under "Checked by") is NON_VERIFIE, never PASS. Nothing is approved: unknown title-block
 fields read "À RENSEIGNER", "Checked by" reads "À VÉRIFIER" and the approval
 fields stay empty.
 
