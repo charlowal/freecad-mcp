@@ -203,7 +203,10 @@ def create_object(
         doc_name: The name of the document to create the object in.
         obj_type: The type of the object to create (e.g. 'Part::Box', 'Part::Cylinder', 'Part::Cut', 'PartDesign::Body', etc.).
         obj_name: The name of the object to create.
-        obj_properties: The properties of the object to create.
+        obj_properties: The properties of the object to create. Link properties
+            (Base, Tool, Shapes, Source, Support, ...) take object names, or a
+            label only one object has: "Shapes": ["PlaqueTops", "PlaqueFront"],
+            "Support": ["Pad", "Face6"].
         include_screenshot: Whether to return a screenshot of the model (default True).
             Set to False to save tokens when visual feedback is not needed,
             e.g. for intermediate steps in a longer sequence of changes.
@@ -365,7 +368,10 @@ def edit_object(
     Args:
         doc_name: The name of the document to edit the object in.
         obj_name: The name of the object to edit.
-        obj_properties: The properties of the object to edit.
+        obj_properties: The properties of the object to edit. Link properties
+            (Base, Tool, Shapes, Source, Support, ...) take object names, or a
+            label only one object has: "Shapes": ["PlaqueTops", "PlaqueFront"],
+            "Support": ["Pad", "Face6"].
         include_screenshot: Whether to return a screenshot of the model (default True).
             Set to False to save tokens when visual feedback is not needed,
             e.g. for intermediate steps in a longer sequence of changes.
@@ -812,24 +818,35 @@ def run_fem_analysis(
 MODELLING_GROUPS = register_modelling_tools(mcp, get_freecad_connection)
 
 
+CODE_TOOLS = ("execute_code", "execute_code_async", "execute_code_headless")
+
+
 def keep_tool_groups(spec: str) -> list[str]:
     """Remove every tool outside the groups named in ``spec``, e.g. "base,drawing".
 
     "base" is the addon's own tools (execute_code, get_view...); the other
-    groups are the modelling modules. Each tool schema goes into the model's
-    prompt on every turn, so a small local model works better with only the
-    groups the task needs. Returns the names of the tools kept.
+    groups are the modelling modules. "code" names the tools that run
+    arbitrary Python (execute_code, execute_code_async, execute_code_headless),
+    and a group written "-name" is taken out of the rest: "base,-code,drawing"
+    serves FreeCAD to a model without letting it run code, for a client that
+    other people or web pages can reach. Each tool schema goes into the
+    model's prompt on every turn, so a small local model works better with
+    only the groups the task needs. Returns the names of the tools kept.
     """
     import asyncio
 
     names = [t.name for t in asyncio.run(mcp.list_tools())]
     modelling = {n for group in MODELLING_GROUPS.values() for n in group}
-    groups = {"base": [n for n in names if n not in modelling], **MODELLING_GROUPS}
+    groups = {"base": [n for n in names if n not in modelling], "code": [n for n in CODE_TOOLS if n in names],
+              **MODELLING_GROUPS}
     wanted = [g.strip().lower() for g in spec.split(",") if g.strip()]
-    unknown = [g for g in wanted if g not in groups]
-    if unknown or not wanted:
-        raise ValueError(f"Unknown tool group(s) {', '.join(unknown) or '(none given)'}; choose among: {', '.join(groups)}")
-    keep = {n for g in wanted for n in groups[g]}
+    taken_out = [g[1:].strip() for g in wanted if g.startswith("-")]
+    added = [g for g in wanted if not g.startswith("-")]
+    unknown = [g for g in added + taken_out if g not in groups]
+    if unknown or not added:
+        raise ValueError(f"Unknown tool group(s) {', '.join(unknown) or '(none given)'}; choose among: {', '.join(groups)}"
+                         " (prefix a group with - to take it out, e.g. base,-code)")
+    keep = {n for g in added for n in groups[g]} - {n for g in taken_out for n in groups[g]}
     for name in names:
         if name not in keep:
             mcp.remove_tool(name)
@@ -878,7 +895,7 @@ def main():
         "--tools",
         default=None,
         help="Tool groups to expose, comma separated, e.g. 'base,files,inspection' "
-        "(groups: base, " + ", ".join(MODELLING_GROUPS) + "; default: all; falls "
+        "(groups: base, code, " + ", ".join(MODELLING_GROUPS) + "; -name takes a group out, e.g. base,-code; default: all; falls "
         "back to the FREECAD_MCP_TOOLS environment variable). Fewer tools make a "
         "smaller prompt, which helps a small local model",
     )

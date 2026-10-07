@@ -43,6 +43,17 @@ def test_every_group_is_named_after_its_module_and_all_groups_keep_everything() 
     assert sorted(r["after"]) == sorted(r["before"])
 
 
+def test_minus_code_serves_freecad_without_running_code() -> None:
+    r = probe("base,-code,drawing")
+    assert not {"execute_code", "execute_code_async", "execute_code_headless"} & set(r["after"])
+    assert {"get_view", "create_object", "edit_object", "create_drawing"} <= set(r["after"])
+
+
+def test_code_alone_keeps_only_the_code_tools() -> None:
+    r = probe("code")
+    assert set(r["after"]) == {"execute_code", "execute_code_async", "execute_code_headless"}
+
+
 def test_an_unknown_group_is_refused_with_the_valid_names() -> None:
     r = probe("base,dessin")
     assert "dessin" in r["error"] and "drawing" in r["error"] and "base" in r["error"]

@@ -52,6 +52,67 @@ def parse_reference_entry(entry: Any) -> tuple[str, Any]:
     )
 
 
+_LINK_KINDS = ("", "Child", "Global", "Hidden")
+_LINK = tuple("App::PropertyLink" + k for k in _LINK_KINDS)
+_LINK_LIST = tuple("App::PropertyLinkList" + k for k in _LINK_KINDS)
+_LINK_SUB = tuple("App::PropertyLinkSub" + k for k in _LINK_KINDS)
+_LINK_SUB_LIST = tuple("App::PropertyLinkSubList" + k for k in _LINK_KINDS)
+_NOT_A_LINK = object()
+
+
+def find_object(doc: FreeCAD.Document, ref: Any) -> Any:
+    """The object a client named: by name, else by a label only one object has.
+
+    A document object passed as is is returned unchanged. An unknown name
+    raises with the document's object names, so the caller can pick one.
+    """
+    if not isinstance(ref, str):
+        return ref
+    obj = doc.getObject(ref)
+    if obj is None:
+        by_label = doc.getObjectsByLabel(ref)
+        if len(by_label) == 1:
+            obj = by_label[0]
+    if obj is None:
+        names = sorted(o.Name for o in doc.Objects)
+        listed = ", ".join(names[:40]) + (" ..." if len(names) > 40 else "")
+        raise ValueError(f"Referenced object '{ref}' not found; objects in {doc.Name}: {listed}")
+    return obj
+
+
+def resolve_link_value(doc: FreeCAD.Document, obj: Any, prop: str, val: Any) -> Any:
+    """``val`` with object names turned into objects, as the property's link type wants.
+
+    PropertyLink takes a name; PropertyLinkList a name or a list of names;
+    PropertyLinkSub a name, ``[name, sub]`` or ``{"object_name", "face"}``;
+    PropertyLinkSubList a list of those. Any other property gives
+    ``_NOT_A_LINK`` and is set as before.
+    """
+    try:
+        kind = obj.getTypeIdOfProperty(prop)
+    except Exception:
+        return _NOT_A_LINK
+    if kind in _LINK:
+        return None if val in (None, "") else find_object(doc, val)
+    if kind in _LINK_LIST:
+        items = val if isinstance(val, (list, tuple)) else [val]
+        return [find_object(doc, v) for v in items]
+    if kind in _LINK_SUB:
+        if val in (None, ""):
+            return None
+        if isinstance(val, str) or not isinstance(val, (list, tuple, dict)):
+            return (find_object(doc, val), [])
+        name, sub_names = parse_reference_entry(val)
+        if sub_names is None:
+            sub_names = []
+        elif isinstance(sub_names, str):
+            sub_names = [sub_names]
+        return (find_object(doc, name), list(sub_names))
+    if kind in _LINK_SUB_LIST:
+        return [(find_object(doc, name), face) for name, face in (parse_reference_entry(e) for e in val)]
+    return _NOT_A_LINK
+
+
 def resolve_references(doc: FreeCAD.Document, val: Any) -> list[tuple[Any, Any]]:
     """Resolve a ``References`` list into ``(DocumentObject, sub_element)`` tuples."""
     refs = []
@@ -103,6 +164,10 @@ def set_object_property(
                         val.get("x", 0), val.get("y", 0), val.get("z", 0)
                     )
                     setattr(obj, prop, vector)
+
+                elif (resolved := resolve_link_value(doc, obj, prop, val)) is not _NOT_A_LINK:
+                    # Link properties take objects; clients give their names
+                    setattr(obj, prop, resolved)
 
                 elif prop in ["Base", "Tool", "Source", "Profile"] and isinstance(
                     val, str
