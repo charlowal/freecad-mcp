@@ -34,10 +34,14 @@ from test_modelisation import RecordingBridge, _modelling_tools
         (5.5, {"prefix": "R"}, "R5.5 [.217]"),
         (0.5, {}, "0.5 [.020]"),
         (25.4, {}, "25.4 [1.000]"),
-        (120.0, {"plus": 0.1, "minus": -0.1}, "120.0 ±0.1 [4.724 ±.004]"),
-        (50.0, {"plus": 0.2, "minus": -0.1}, "50.0 +0.2/-0.1 [1.969 +.008/-.004]"),
-        (50.0, {"plus": 0.0, "minus": -0.05}, "50.00 0/-0.05 [1.969 +.000/-.002]"),
-        (34.8, {"plus": 0.3, "minus": 0.0}, "34.8 +0.3/0 [1.370 +.012/-.000]"),
+        (120.0, {"plus": 0.1, "minus": -0.1}, "120 ±0.1 [4.721–4.728]"),
+        (50.0, {"plus": 0.2, "minus": -0.1}, "50 +0.2/-0.1 [1.965–1.976]"),
+        (50.0, {"plus": 0.0, "minus": -0.05}, "50 0/-0.05 [1.9666–1.9685]"),
+        (34.8, {"plus": 0.3, "minus": 0.0}, "34.8 +0.3/0 [1.371–1.381]"),
+        (12.0, {"plus": 0.1, "minus": -0.1}, "12 ±0.1 [.469–.476]"),
+        (20.03, {"plus": 0.01, "minus": -0.01, "limits": True, "prefix": "⌀"}, "⌀20.02–20.04 [.7882–.7889]"),
+        (6.7, {"plus": 0.1, "minus": -0.1, "limits": True}, "6.6–6.8 [.260–.267]"),
+        (16.0, {"plus": 0.2, "minus": -0.2}, "16 ±0.2 [.623–.637]"),
         (120.0, {"dual": False}, "120"),
         (120.0, {"decimals_mm": 2, "decimals_in": 4}, "120.00 [4.7244]"),
         (11.0, {"prefix": "2X ⌀", "suffix": " THRU"}, "2X ⌀11 [.433] THRU"),
@@ -80,9 +84,39 @@ def test_hole_callout_note_is_its_last_line() -> None:
     assert _hole_text({"diameter": 4.9, "through": True}, 4, spec) == "4X ⌀4.9 [.193] THRU\nREAM 3/16 IN"
 
 
-def test_hole_callout_ignores_a_dimension_prefix_and_tolerance() -> None:
+def test_hole_callout_ignores_a_dimension_prefix_but_tolerates_the_size() -> None:
     spec = {"dual": True, "decimals_in": 3, "prefix": "X", "plus": 0.1, "minus": -0.1}
-    assert _hole_text({"diameter": 11.0, "through": True}, 1, spec) == "⌀11 [.433] THRU"
+    assert _hole_text({"diameter": 11.0, "through": True}, 1, spec) == "⌀11 ±0.1 [.430–.437] THRU"
+    spec["limits"] = True
+    assert _hole_text({"diameter": 6.7, "through": True}, 4, spec) == "4X ⌀6.6–6.8 [.260–.267] THRU"
+
+
+def test_hole_callout_depths_stay_untoleranced() -> None:
+    spec = {"dual": True, "decimals_in": 3, "plus": 0.1, "minus": -0.1}
+    assert _hole_text({"diameter": 6.6, "through": False, "depth": 12.0}, 1, spec) == "⌀6.6 ±0.1 [.256–.263] ↧ 12 [.472]"
+
+
+def test_thread_callout_replaces_the_drill_size() -> None:
+    spec = {"dual": True, "decimals_in": 3, "thread": "M5×0.8-6H"}
+    assert _hole_text({"diameter": 4.2, "through": True}, 2, spec) == "2X M5×0.8-6H THRU"
+    spec["thread_depth"] = 10.0
+    assert _hole_text({"diameter": 4.2, "through": False, "depth": 13.0}, 2, spec) == "2X M5×0.8-6H ↧ 10 [.394]"
+    del spec["thread_depth"]
+    with pytest.raises(ValueError, match="full-thread depth"):
+        _hole_text({"diameter": 4.2, "through": False, "depth": 13.0}, 2, spec)
+
+
+@pytest.mark.parametrize(("low", "high"), [(19.9, 20.1), (6.6, 6.8), (20.0, 20.021), (49.95, 50.0), (0.05, 0.06),
+                                           (119.5, 120.5), (3.0, 3.001)])
+def test_inch_limits_never_leave_the_mm_range(low: float, high: float) -> None:
+    from freecad_mcp.modelisation.drawing import _inch_limits
+    lo, hi = (float("0" + t) for t in _inch_limits(low, high, 3).split("–"))
+    assert low <= lo * 25.4 + 1e-9 and hi * 25.4 <= high + 1e-9 and lo <= hi
+
+
+def test_a_tolerance_needs_two_limits() -> None:
+    with pytest.raises(ValueError, match="two different limits"):
+        _dual_text({"plus": 0.0, "minus": 0.0}, 10.0)
 
 
 @pytest.mark.parametrize(("scale", "text"), [(1.0, "1:1"), (0.5, "1:2"), (0.25, "1:4"), (2.0, "2:1"), (0.1, "1:10")])

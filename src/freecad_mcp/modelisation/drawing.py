@@ -90,57 +90,106 @@ def _fmt(value, decimals, leading_zero=True):
     return text
 
 
-def _tolerance_text(spec, decimals, inch):
-    """" ±0.1", " +0.2/-0.1", or "" for a dimension without tolerance."""
+def _tolerance_text(spec, decimals=None):
+    """Metric deviations: " ±0.1", " +0.2/-0.1", " +0.3/0", or "" without tolerance.
+
+    ASME Y14.5 in mm: both deviations carry the same decimals; a nil deviation
+    is a single 0 without sign; the dimension itself need not match them
+    ("12 ±0.1", not "12.0 ±0.1").
+    """
     plus, minus = spec.get("plus"), spec.get("minus")
     if plus is None and minus is None:
         return ""
-    k = 1 / 25.4 if inch else 1.0
-    lead = not inch
     plus = plus or 0.0
     minus = minus or 0.0
+    if decimals is None:
+        decimals = max(_decimals(abs(plus), 3), _decimals(abs(minus), 3))
     if abs(plus + minus) < 1e-12:
-        return " ±" + _fmt(abs(plus) * k, decimals, lead)
+        return " ±" + _fmt(abs(plus), decimals)
 
     def deviation(value, sign):
-        # Metric: a nil deviation is a single 0 without sign; inch keeps its decimals and sign
-        if abs(value) < 1e-12 and not inch:
+        if abs(value) < 1e-12:
             return "0"
-        return sign + _fmt(abs(value) * k, decimals, lead)
+        return sign + _fmt(abs(value), decimals)
 
     up = deviation(plus, "+" if plus >= 0 else "-")
     down = deviation(minus, "-" if minus <= 0 else "+")
     return " " + up + "/" + down
 
 
-def _dual_text(spec, value):
-    """The text of a dimension of ``value`` mm: "120 [4.724]", "⌀11 ±0.1 [.433 ±.004]".
+def _inch_limits(low, high, decimals):
+    """Limits in mm converted to inches and rounded inward: the inch range
+    never reaches outside the mm range (lower limit up, upper limit down).
+    Narrow ranges get a decimal more until the rounded limits stay in order."""
+    for d in range(decimals, 7):
+        q = 10 ** d
+        lo = math.ceil(low / 25.4 * q - 1e-9) / q
+        hi = math.floor(high / 25.4 * q + 1e-9) / q
+        if lo <= hi + 1e-12:
+            return _fmt(lo, d, False) + "–" + _fmt(hi, d, False)
+    raise ValueError("The range %s–%s mm is too narrow to write in inches" % (low, high))
 
-    mm keep the fewest decimals that write the value (no trailing zero),
-    inches a fixed count without leading zero. ``dual`` False keeps mm only.
+
+def _dual_text(spec, value):
+    """The text of a dimension of ``value`` mm: "120 [4.724]", "⌀11 ±0.1 [.429–.437]".
+
+    mm keep the fewest decimals that write the value (no trailing zero).
+    With a tolerance, the inch text is the pair of limits, converted and
+    rounded inward, so the reference inches never widen the mm tolerance;
+    3 inch decimals for deviations of 0.1 mm and more, 4 below. ``limits``
+    writes the mm as limits too ("20.02–20.04"). ``dual`` False keeps mm only.
     """
     decimals_in = spec.get("decimals_in", 3)
     decimals_mm = spec.get("decimals_mm")
-    tolerances = [abs(t) for t in (spec.get("plus"), spec.get("minus")) if t]
-    if decimals_mm is None:
-        decimals_mm = max([_decimals(value, 2)] + [_decimals(t, 3) for t in tolerances])
-    text = _fmt(value, decimals_mm) + _tolerance_text(spec, decimals_mm, False)
+    plus, minus = spec.get("plus"), spec.get("minus")
+    toleranced = plus is not None or minus is not None
+    if toleranced:
+        low = value + min(plus or 0.0, minus or 0.0)
+        high = value + max(plus or 0.0, minus or 0.0)
+        if high - low < 1e-9:
+            raise ValueError("A tolerance needs two different limits")
+    if toleranced and spec.get("limits"):
+        d = decimals_mm if decimals_mm is not None else max(_decimals(low, 3), _decimals(high, 3))
+        text = _fmt(low, d) + "–" + _fmt(high, d)
+    else:
+        d = decimals_mm if decimals_mm is not None else _decimals(value, 2)
+        text = _fmt(value, d) + _tolerance_text(spec)
     if spec.get("dual", True):
-        text += " [" + _fmt(value / 25.4, decimals_in, False) + _tolerance_text(spec, decimals_in, True) + "]"
+        if toleranced:
+            smallest = min(abs(t) for t in (plus, minus) if t)
+            text += " [" + _inch_limits(low, high, max(decimals_in, 3 if smallest >= 0.1 - 1e-9 else 4)) + "]"
+        else:
+            text += " [" + _fmt(value / 25.4, decimals_in, False) + "]"
     return spec.get("prefix", "") + text + spec.get("suffix", "")
 
 
 def _hole_text(hole, count, spec):
-    """Hole callout, one line per stage: "2X ⌀11 [.433] THRU" then ⌴ or ⌵, then any note."""
+    """Hole callout, one line per stage: "2X ⌀11 [.433] THRU" then ⌴ or ⌵, then any note.
+
+    ``thread`` ("M5×0.8-6H") replaces the drill size on the first line, with
+    THRU or the full-thread depth ``thread_depth``; ``plus``/``minus``/``limits``
+    tolerate the hole's size only, never its depths.
+    """
     plain = dict(spec)
-    for key in ("prefix", "suffix", "plus", "minus", "decimals_mm"):
+    for key in ("prefix", "suffix", "plus", "minus", "decimals_mm", "limits"):
         plain.pop(key, None)
 
     def size(value):
         return _dual_text(plain, value)
 
-    first = ("%dX " % count if count > 1 else "") + "⌀" + size(hole["diameter"])
-    first += " THRU" if hole["through"] else " ↧ " + size(hole["depth"])
+    sized = dict(plain, plus=spec.get("plus"), minus=spec.get("minus"), limits=spec.get("limits"))
+    count_text = "%dX " % count if count > 1 else ""
+    if spec.get("thread"):
+        first = count_text + spec["thread"]
+        if hole["through"]:
+            first += " THRU"
+        elif spec.get("thread_depth"):
+            first += " ↧ " + size(spec["thread_depth"])
+        else:
+            raise ValueError("A blind thread needs its full-thread depth (thread_depth)")
+    else:
+        first = count_text + "⌀" + _dual_text(sized, hole["diameter"])
+        first += " THRU" if hole["through"] else " ↧ " + size(hole["depth"])
     lines = [first]
     if hole.get("cbore_diameter"):
         lines.append("⌴ ⌀" + size(hole["cbore_diameter"]) + " ↧ " + size(hole["cbore_depth"]))
@@ -286,7 +335,7 @@ def _scale_text(scale):
     return "1:" + _fmt(1 / scale, _decimals(1 / scale, 2))
 
 
-_SHARED = (_decimals, _fmt, _tolerance_text, _dual_text, _hole_text, _template_areas, _scale_text)
+_SHARED = (_decimals, _fmt, _tolerance_text, _inch_limits, _dual_text, _hole_text, _template_areas, _scale_text)
 
 # ---------------------------------------------------------------------------
 # Helpers that only exist inside FreeCAD
@@ -953,6 +1002,23 @@ def _split_datum(ref: str) -> tuple[str, str | None]:
     return letter, modifier.upper() if modifier else None
 
 
+def _deviations(tolerance, upper, lower):
+    """(plus, minus) deviations in mm from a ± tolerance or from upper and lower; (None, None) without."""
+    if tolerance is not None and (upper is not None or lower is not None):
+        raise ValueError("Give either tolerance (±) or upper and lower")
+    if tolerance is not None:
+        if not tolerance:
+            raise ValueError("A ± tolerance must not be zero")
+        return abs(tolerance), -abs(tolerance)
+    if upper is not None or lower is not None:
+        if upper is None or lower is None:
+            raise ValueError("Give both upper and lower deviations")
+        if upper <= lower:
+            raise ValueError("upper must be above lower")
+        return upper, lower
+    return None, None
+
+
 def check_gdt(characteristic: str, diameter_zone: bool, material_condition: str | None,
               datums: list[str]) -> list[str]:
     """Refuse a feature control frame that cannot be right; return warnings."""
@@ -982,12 +1048,18 @@ def check_gdt(characteristic: str, diameter_zone: bool, material_condition: str 
 
 
 def gdt_frame_svg(characteristic: str, tolerance: str, diameter_zone: bool = False,
-                  material_condition: str | None = None, datums: list[str] | None = None) -> tuple[str, float]:
-    """SVG of a feature control frame, and its width in mm (height 8 mm)."""
+                  material_condition: str | None = None, datums: list[str] | None = None,
+                  projected: str | None = None) -> tuple[str, float]:
+    """SVG of a feature control frame, and its width in mm (height 8 mm).
+
+    ``projected`` is the height of a projected tolerance zone, written after a
+    circled P: "⌀0.2 Ⓟ 6".
+    """
     datums = datums or []
     h = _FRAME_HEIGHT
     tol_text = ("⌀" if diameter_zone else "") + tolerance
-    cells = [8.0, 3.0 + _text_width(tol_text) + (4.6 if material_condition else 0.0)]
+    extra = (4.6 if material_condition else 0.0) + ((5.2 + _text_width(projected)) if projected else 0.0)
+    cells = [8.0, 3.0 + _text_width(tol_text) + extra]
     parsed = [_split_datum(d) for d in datums]
     cells += [3.0 + _text_width(letter) + (4.6 if mod else 0.0) for letter, mod in parsed]
     width = sum(cells)
@@ -999,8 +1071,13 @@ def gdt_frame_svg(characteristic: str, tolerance: str, diameter_zone: bool = Fal
     texts = [f'<g fill="none" stroke="black" stroke-width="0.3" stroke-linejoin="round">{_GDT_SYMBOLS[characteristic]}</g>']
     x = cells[0] + 1.5
     texts.append(f'<text x="{x:.2f}" y="5.25" font-family="osifont" font-size="{_TEXT}">{escape(tol_text)}</text>')
+    after = cells[0] + 1.5 + _text_width(tol_text)
     if material_condition:
-        texts.append(_modifier_svg(cells[0] + cells[1] - 2.8, material_condition.upper()))
+        texts.append(_modifier_svg(after + 2.3, material_condition.upper()))
+        after += 4.6
+    if projected:
+        texts.append(_modifier_svg(after + 2.3, "P"))
+        texts.append(f'<text x="{after + 5.2:.2f}" y="5.25" font-family="osifont" font-size="{_TEXT}">{escape(projected)}</text>')
     x = cells[0] + cells[1]
     for (letter, mod), cell in zip(parsed, cells[2:]):
         texts.append(f'<text x="{x + 1.5:.2f}" y="5.25" font-family="osifont" font-size="{_TEXT}">{letter}</text>')
@@ -1308,7 +1385,7 @@ section.SectionOrigin = point
 section.SectionSymbol = _args["symbol"]
 section.ScaleType = "Custom"
 section.Scale = _args.get("scale") or base.getScale()
-section.Label = "SECTION " + _args["symbol"] + "-" + _args["symbol"]
+section.Label = (_args.get("caption") or "SECTION") + " " + _args["symbol"] + "-" + _args["symbol"]
 _settle([section])
 x0, y0, x1, y1 = _view_box(section)
 w, h = (x1 - x0) * section.getScale(), (y1 - y0) * section.getScale()
@@ -1386,7 +1463,8 @@ if abs(raw - expected) > 1e-6 * max(1.0, expected):
     _remove(dim.Name)
     raise ValueError("TechDraw measured " + str(raw) + " where the geometry gives " + str(expected) + "; dimension removed")
 spec = dict(dual=_args["dual"], decimals_in=_args["decimals_in"], decimals_mm=_args.get("decimals_mm"),
-            plus=_args.get("plus"), minus=_args.get("minus"), suffix=_args.get("suffix") or "",
+            plus=_args.get("plus"), minus=_args.get("minus"), limits=bool(_args.get("limits")),
+            suffix=_args.get("suffix") or "",
             prefix=(_args.get("prefix") or "") + dict(diameter="⌀", radius="R").get(kind, ""), kind=kind)
 text = _dual_text(spec, raw)
 _store_spec(dim, spec)
@@ -1508,7 +1586,16 @@ for h in holes:
             break
     else:
         groups.append(dict(signature=sig, holes=[h]))
+if _args.get("diameter") is not None:
+    wanted = [g for g in groups if abs(g["holes"][0]["diameter"] - _args["diameter"]) < 1e-3]
+    if not wanted:
+        raise ValueError("No hole of ⌀" + str(_args["diameter"]) + " in this view; diameters found: "
+                         + ", ".join(sorted(set("%g" % g["holes"][0]["diameter"] for g in groups))))
+    groups = wanted
 spec = dict(dual=_args["dual"], decimals_in=_args["decimals_in"], kind="hole", note=_args.get("note") or "")
+for key in ("thread", "thread_depth", "plus", "minus", "limits"):
+    if _args.get(key) is not None and _args.get(key) is not False:
+        spec[key] = _args[key]
 made, missed = [], []
 s = view.getScale()
 for g in groups:
@@ -2274,6 +2361,7 @@ def register_drawing_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -
         symbol: str = "A",
         scale: float | None = None,
         position: list[float] | None = None,
+        caption: str = "SECTION",
         doc_name: str | None = None,
     ) -> dict[str, Any]:
         """Cut a section through a view and place it in the free space.
@@ -2288,15 +2376,20 @@ def register_drawing_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -
             symbol: Section letter: the view is captioned "SECTION A-A".
             scale: Scale of the section; the base view's if None.
             position: Centre on the sheet [x, y] in mm; free space if None.
+            caption: Word before the letters, "SECTION" or "COUPE" for a
+                drawing in French: "COUPE A-A".
             doc_name: Document. Uses active document if None.
 
         Returns:
             The section's name, caption, box on the sheet and the area cut.
         """
-        if not re.fullmatch(r"[A-HJ-NPR-Z]{1,2}", symbol):
-            raise ValueError("symbol is one or two capital letters, without I, O or Q")
+        if not re.fullmatch(r"[A-HJ-NPR-WYZ]{1,2}", symbol):
+            raise ValueError("symbol is one or two capital letters, without I, O, Q or X")
+        if not re.fullmatch(r"[A-ZÀ-Ü][A-ZÀ-Ü ]*", caption):
+            raise ValueError("caption is a word in capitals, e.g. SECTION or COUPE")
         return await run(_ADD_SECTION, "Adding the section failed", base_view=base_view, point=point,
-                         normal=normal, symbol=symbol, scale=scale, position=position, doc_name=doc_name)
+                         normal=normal, symbol=symbol, scale=scale, position=position, caption=caption,
+                         doc_name=doc_name)
 
     @mcp.tool()
     async def add_dimension(
@@ -2312,6 +2405,7 @@ def register_drawing_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -
         upper: float | None = None,
         lower: float | None = None,
         basic: bool = False,
+        limits: bool = False,
         dual: bool = True,
         decimals_mm: int | None = None,
         decimals_in: int = 3,
@@ -2342,9 +2436,12 @@ def register_drawing_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -
             upper: Upper deviation in mm, e.g. 0.2 (with lower).
             lower: Lower deviation in mm, e.g. -0.1 (with upper).
             basic: Basic (theoretically exact) dimension, drawn boxed.
-            dual: Show inches in brackets after mm.
+            limits: Write the toleranced size as its limits, "20.02–20.04"
+                (lower first), instead of nominal and deviations.
+            dual: Show inches in brackets after mm; a toleranced dimension
+                shows its inch limits, rounded inward ("[.7882–.7889]").
             decimals_mm: Fixed mm decimals; fewest exact decimals if None.
-            decimals_in: Inch decimals.
+            decimals_in: Inch decimals (at least; 4 for deviations under 0.1 mm).
             prefix: Text before the value, e.g. "2X ".
             suffix: Text after it, e.g. " THRU".
             doc_name: Document. Uses active document if None.
@@ -2352,21 +2449,12 @@ def register_drawing_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -
         Returns:
             The dimension's name, measured value in mm and text.
         """
-        if tolerance is not None and (upper is not None or lower is not None):
-            raise ValueError("Give either tolerance (±) or upper and lower")
-        if tolerance is not None:
-            plus, minus = abs(tolerance), -abs(tolerance)
-        elif upper is not None or lower is not None:
-            if upper is None or lower is None:
-                raise ValueError("Give both upper and lower deviations")
-            if upper < lower:
-                raise ValueError("upper must be above lower")
-            plus, minus = upper, lower
-        else:
-            plus = minus = None
+        plus, minus = _deviations(tolerance, upper, lower)
+        if limits and plus is None:
+            raise ValueError("limits needs a tolerance (tolerance, or upper and lower)")
         return await run(_ADD_DIMENSION, "Adding the dimension failed", view_name=view_name, kind=kind,
                          points=points, center=center, radius=radius, elements=elements, side=side,
-                         offset=offset, plus=plus, minus=minus, basic=basic, dual=dual,
+                         offset=offset, plus=plus, minus=minus, basic=basic, limits=limits, dual=dual,
                          decimals_mm=decimals_mm, decimals_in=decimals_in, prefix=prefix, suffix=suffix,
                          doc_name=doc_name)
 
@@ -2391,6 +2479,13 @@ def register_drawing_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -
     async def add_hole_callouts(
         view_name: str,
         object_names: list[str] | None = None,
+        diameter: float | None = None,
+        thread: str | None = None,
+        thread_depth: float | None = None,
+        tolerance: float | None = None,
+        upper: float | None = None,
+        lower: float | None = None,
+        limits: bool = False,
         dual: bool = True,
         decimals_in: int = 3,
         offset: float = 8.0,
@@ -2402,11 +2497,20 @@ def register_drawing_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -
         Holes are found in the solids themselves, so imported STEP parts
         work too: drill diameter, THRU or depth (↧), counterbore (⌴) and
         countersink (⌵); identical holes share one callout "2X ...".
-        Threads are not recognised.
+        Threads are not recognised in the solid: give ``thread`` for the
+        group of tapped holes, modelled at their tap-drill diameter.
 
         Args:
             view_name: The view where the holes appear as circles.
             object_names: Parts to search; the view's sources if None.
+            diameter: Only the holes of this modelled diameter (mm); all if None.
+            thread: Thread designation that replaces the drill size, e.g.
+                "M5×0.8-6H" or "1/4-20 UNC-2B" (needs ``diameter``).
+            thread_depth: Full-thread depth in mm for a blind thread.
+            tolerance: Symmetric tolerance of the hole size (±), in mm.
+            upper: Upper deviation of the hole size (with lower).
+            lower: Lower deviation of the hole size (with upper).
+            limits: Write the size as its limits, "⌀6.6–6.8".
             dual: Show inches in brackets after mm.
             decimals_in: Inch decimals.
             offset: Leader length beyond the circle, in sheet mm.
@@ -2418,9 +2522,17 @@ def register_drawing_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -
             Each callout's name, text and hole count, and the hole groups
             this view cannot show.
         """
+        plus, minus = _deviations(tolerance, upper, lower)
+        if (thread or plus is not None) and diameter is None:
+            raise ValueError("thread and size tolerances apply to one group of holes: give its diameter")
+        if thread and plus is not None:
+            raise ValueError("A thread designation carries its own tolerance class; give no size tolerance")
+        if limits and plus is None:
+            raise ValueError("limits needs a tolerance (tolerance, or upper and lower)")
         return await run(_ADD_HOLE_CALLOUTS, "Adding hole callouts failed", view_name=view_name,
-                         object_names=object_names, dual=dual, decimals_in=decimals_in, offset=offset,
-                         note=note, doc_name=doc_name)
+                         object_names=object_names, diameter=diameter, thread=thread, thread_depth=thread_depth,
+                         plus=plus, minus=minus, limits=limits, dual=dual, decimals_in=decimals_in,
+                         offset=offset, note=note, doc_name=doc_name)
 
     @mcp.tool()
     async def add_hole_table(
@@ -2467,6 +2579,7 @@ def register_drawing_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -
         leader: list[float] | None = None,
         page_name: str | None = None,
         position: list[float] | None = None,
+        projected_height: float | None = None,
         dual: bool = False,
         doc_name: str | None = None,
     ) -> dict[str, Any]:
@@ -2491,6 +2604,9 @@ def register_drawing_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -
                 leader leaves the view and the frame lands in free space.
             page_name: Sheet, when placing by position instead.
             position: Frame centre on the sheet [x, y], without leader.
+            projected_height: Height in mm of a projected tolerance zone (Ⓟ),
+                for tapped holes and pressed pins: at least the thickness of
+                the mating part; position and orientation only.
             dual: Also write the tolerance in inches.
             doc_name: Document. Uses active document if None.
 
@@ -2501,14 +2617,23 @@ def register_drawing_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -
         warnings = check_gdt(characteristic, diameter_zone, material_condition, datums)
         if not (math.isfinite(tolerance) and tolerance > 0):
             raise ValueError("tolerance must be a positive size in mm")
+        projected = None
+        if projected_height is not None:
+            if characteristic not in ("position", "perpendicularity", "parallelism", "angularity"):
+                raise ValueError("A projected tolerance zone applies to position or orientation only")
+            if not (math.isfinite(projected_height) and projected_height > 0):
+                raise ValueError("projected_height must be a positive height in mm")
+            projected = _fmt(projected_height, _decimals(projected_height, 2))
         spec = {"dual": dual, "decimals_in": 4}
         text = _dual_text(spec, tolerance)
-        svg, width = gdt_frame_svg(characteristic, text, diameter_zone, material_condition, datums)
+        svg, width = gdt_frame_svg(characteristic, text, diameter_zone, material_condition, datums, projected)
         properties = {
             "GdtCharacteristic": characteristic,
             "GdtTolerance": text,
             "GdtDatums": ",".join(_split_datum(d)[0] for d in datums),
         }
+        if projected:
+            properties["GdtProjected"] = projected
         result = await run(_ADD_GDT, "Adding the feature control frame failed", kind="FeatureControlFrame", svg=svg,
                            width=width, properties=properties, view_name=view_name, point=point,
                            leader=leader, page_name=page_name, position=position, doc_name=doc_name)
@@ -2517,12 +2642,20 @@ def register_drawing_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -
     @mcp.tool()
     async def add_datum_symbol(
         letter: str,
-        view_name: str,
-        point: list[float],
+        view_name: str | None = None,
+        point: list[float] | None = None,
         side: str = "up",
+        page_name: str | None = None,
+        position: list[float] | None = None,
+        touching: list[str] | None = None,
         doc_name: str | None = None,
     ) -> dict[str, Any]:
         """Add a datum feature symbol whose triangle sits on a feature.
+
+        A plane surface takes the symbol on its edge (view_name and point).
+        A feature of size (hole, slot, pin) takes it on its feature control
+        frame or in line with its size dimension: give page_name and the
+        sheet position of the triangle's base instead.
 
         Args:
             letter: Datum letter, A to Z without I, O and Q.
@@ -2530,15 +2663,20 @@ def register_drawing_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -
             point: 3D point (model mm) on the feature's edge in that view.
             side: Where the letter box stands from the feature: up, down,
                 left or right.
+            page_name: Sheet, when placing by position instead.
+            position: Sheet point [x, y] in mm (y up) where the triangle's
+                base sits, e.g. the bottom edge of a feature control frame.
+            touching: Names of the objects the symbol is meant to touch (the
+                frame it hangs from), left out of the overlap report.
             doc_name: Document. Uses active document if None.
 
         Returns:
             The symbol's name and box on the sheet.
         """
         svg, offset = datum_symbol_svg(letter, side)
-        body = _ADD_DATUM
-        return await run(body, "Adding the datum symbol failed", svg=svg, offset=list(offset), letter=letter,
-                         view_name=view_name, point=point, doc_name=doc_name)
+        return await run(_ADD_DATUM, "Adding the datum symbol failed", svg=svg, offset=list(offset), letter=letter,
+                         view_name=view_name, point=point, page_name=page_name, position=position,
+                         touching=touching, doc_name=doc_name)
 
     @mcp.tool()
     async def add_weld_symbol(
@@ -2854,10 +2992,20 @@ def register_drawing_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -
 
 
 _ADD_DATUM = r'''
-view = _part_view(_args["view_name"])
-page = _page_of(view)
-xy = _to_view(view, _args["point"])
-px, py = _to_page(view, xy)
+if _args.get("position"):
+    # Triangle base at a sheet point: on a feature control frame or a dimension line
+    if not _args.get("page_name"):
+        raise ValueError("Give page_name with a position")
+    page = _page(_args["page_name"])
+    view = None
+    px, py = _args["position"]
+else:
+    if not (_args.get("view_name") and _args.get("point")):
+        raise ValueError("Give view_name and point (on a surface), or page_name and position (on a frame)")
+    view = _part_view(_args["view_name"])
+    page = _page_of(view)
+    xy = _to_view(view, _args["point"])
+    px, py = _to_page(view, xy)
 symbol = doc.addObject("TechDraw::DrawViewSymbol", "Datum" + _args["letter"])
 symbol.Symbol = _args["svg"]
 page.addView(symbol)
@@ -2867,8 +3015,11 @@ symbol.GdtDatum = _args["letter"]
 doc.recompute()
 box = _symbol_box(symbol)
 # The triangle touches its own view by design; anything else under the symbol is reported
+skip = set(_args.get("touching") or [])
+if view is not None:
+    skip.add(view.Name)
 hits = sorted(set(n.split(":")[0] for n, b in _note_boxes(page) + _boxes(page, skip=(symbol.Name,))
-                  if n != view.Name and _overlap(box, b)))
+                  if n.split(":")[0] not in skip and _overlap(box, b)))
 _result_ = dict(name=symbol.Name, letter=_args["letter"], feature_point=[round(px, 3), round(py, 3)], box=box,
                 overlaps=hits, warning=("covers " + ", ".join(hits) + ": try another side") if hits else None)
 '''
