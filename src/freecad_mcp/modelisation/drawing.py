@@ -1749,10 +1749,13 @@ for g in groups:
         spot, h, edge, radius = min(spots, key=lambda c: (V(*c[1]["center"]) - at).Length)
     else:
         spot, h, edge, radius = min(spots, key=lambda c: c[0][2])
-    # The leader ends on the hole's outermost circle (countersink, counterbore or mouth chamfer): an arrow
-    # on the drill circle runs across the outer one and reads smudged (MEP-101 r3)
+    # The leader ends on the hole's outermost circle (countersink, counterbore): an arrow on the drill
+    # circle runs across the outer one and reads smudged (MEP-101 r3). A mouth chamfer called out on its
+    # own (csink=False) is not the feature: the leader ends on the hole's own circle, the surface the size,
+    # the datum and any surface texture apply to (MEP-101 r5: Ra on the chamfer edge named the chamfer)
     target = h["diameter"]
-    for outer in sorted((d for d in (h.get("csink_diameter"), h.get("cbore_diameter")) if d), reverse=True):
+    outers = [h.get("cbore_diameter")] + ([h.get("csink_diameter")] if spec.get("csink", True) else [])
+    for outer in sorted((d for d in outers if d), reverse=True):
         try:
             edge, radius = _circle_at(view, h["center"], outer / 2)
             target = outer
