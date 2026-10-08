@@ -103,7 +103,7 @@ def test_thread_callout_replaces_the_drill_size() -> None:
     spec = {"dual": True, "decimals_in": 3, "thread": "M5×0.8-6H"}
     assert _hole_text({"diameter": 4.2, "through": True}, 2, spec) == "2X M5×0.8-6H THRU"
     spec["thread_depth"] = 7.0
-    assert _hole_text({"diameter": 4.2, "through": False, "depth": 9.0}, 2, spec) == "2X ⌀4.2 [.165] ↧ 9 [.354]\nM5×0.8-6H ↧ 7 [.276]"
+    assert _hole_text({"diameter": 4.2, "through": False, "depth": 9.0}, 2, spec) == "2X M5×0.8-6H ↧ 7 [.276]\n⌀4.2 [.165] ↧ 9 [.354]"
     spec["thread_depth"] = 9.0
     with pytest.raises(ValueError, match="above the drilled depth"):
         _hole_text({"diameter": 4.2, "through": False, "depth": 9.0}, 2, spec)
@@ -367,7 +367,7 @@ def test_beside_puts_a_linear_dimension_in_referencing_style() -> None:
 def test_a_tap_drill_can_be_held_inside_the_minor_diameter() -> None:
     hole = dict(diameter=4.2, through=False, depth=9.0)
     spec = dict(dual=True, decimals_in=3, thread="M5×0.8-6H", thread_depth=7.0, drill_limits=[4.15, 4.30])
-    assert _hole_text(hole, 2, spec).split("\n")[:2] == ["2X ⌀4.15–4.30 [.1634–.1692] ↧ 9 [.354]", "M5×0.8-6H ↧ 7 [.276]"]
+    assert _hole_text(hole, 2, spec).split("\n")[:2] == ["2X M5×0.8-6H ↧ 7 [.276]", "⌀4.15–4.30 [.1634–.1692] ↧ 9 [.354]"]
     with pytest.raises(ValueError, match="outside drill_limits"):
         _hole_text(dict(hole, diameter=4.1), 2, spec)
     with pytest.raises(ToolError, match="drill_limits"):
@@ -401,4 +401,11 @@ def test_a_full_thread_depth_can_be_a_minimum() -> None:
     hole = dict(diameter=4.2, through=False, depth=9.0)
     spec = dict(dual=True, decimals_in=3, thread="M5×0.8-6H", thread_depth=7.0, thread_depth_min=True,
                 drill_limits=[4.15, 4.30])
-    assert _hole_text(hole, 2, spec).split("\n")[1] == "M5×0.8-6H ↧ 7 [.276] MIN"
+    assert _hole_text(hole, 2, spec).split("\n")[0] == "2X M5×0.8-6H ↧ 7 [.276] MIN"
+
+
+def test_revision_table_can_carry_a_title_row() -> None:
+    bridge, _ = _run("add_revision_table", page_name="Sheet", revisions=[dict(rev="P01", description="PROTOTYPE")],
+                     title="RÉVISIONS")
+    assert _script_args(bridge.scripts[0])["title"] == "RÉVISIONS"
+    assert 'table.mergeCells("A1:"' in bridge.scripts[0]

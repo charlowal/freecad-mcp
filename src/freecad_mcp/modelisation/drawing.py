@@ -209,9 +209,9 @@ def _hole_text(hole, count, spec):
                     drill += " [" + _inch_limits(lo, hi, 4) + "]"
             else:
                 drill = size(hole["diameter"])
-            # Tap drill first, as in Y14.6: the first line is the longest, so the leader that ends it
-            # does not run across the lines under it
-            first = count_text + "⌀" + drill + " ↧ " + size(hole["depth"]) + "\n" + first[len(count_text):]
+            # Thread first: the frame under the callout then plainly controls the thread (pitch cylinder
+            # axis, Y14.5), not the drilled hole (MEP-101 r3). The tap drill and its depth follow.
+            first += "\n⌀" + drill + " ↧ " + size(hole["depth"])
         else:
             raise ValueError("A blind thread needs its full-thread depth (thread_depth)")
     else:
@@ -1748,6 +1748,16 @@ for g in groups:
         spot, h, edge, radius = min(spots, key=lambda c: (V(*c[1]["center"]) - at).Length)
     else:
         spot, h, edge, radius = min(spots, key=lambda c: c[0][2])
+    # The leader ends on the hole's outermost circle (countersink, counterbore or mouth chamfer): an arrow
+    # on the drill circle runs across the outer one and reads smudged (MEP-101 r3)
+    target = h["diameter"]
+    for outer in sorted((d for d in (h.get("csink_diameter"), h.get("cbore_diameter")) if d), reverse=True):
+        try:
+            edge, radius = _circle_at(view, h["center"], outer / 2)
+            target = outer
+            break
+        except ValueError:
+            continue
     dim = doc.addObject("TechDraw::DrawViewDimension", "HoleCallout")
     dim.Type = "Diameter"
     dim.MeasureType = "Projected"
@@ -1755,9 +1765,9 @@ for g in groups:
     page.addView(dim)
     doc.recompute()
     raw = dim.getRawValue()
-    if abs(raw - h["diameter"]) > 1e-6:
+    if abs(raw - target) > 1e-6:
         _remove(dim.Name)
-        raise ValueError("TechDraw measured " + str(raw) + " for a hole of " + str(h["diameter"]))
+        raise ValueError("TechDraw measured " + str(raw) + " for a circle of " + str(target))
     entry = dict(spec, object=h["object"], objects=[o.Name for o in objects], center=h["center"],
                  signature=[list(x) for x in g["signature"]], side="up_left")
     _store_spec(dim, entry)
@@ -1952,6 +1962,7 @@ frame, block = sheet["frame"], sheet["title_block"]
 rows = _args["rows"]
 columns = _args["columns"]
 name = _args["sheet_name"]
+top = 2 if _args.get("title") else 1
 old = doc.getObject(name)
 if old is not None and old.isDerivedFrom("Spreadsheet::Sheet"):
     old.clearAll()
@@ -1959,14 +1970,19 @@ if old is not None and old.isDerivedFrom("Spreadsheet::Sheet"):
 else:
     table = doc.addObject("Spreadsheet::Sheet", name)
 letters = [chr(ord("A") + i) for i in range(len(columns))]
+if top == 2:
+    table.set("A1", str(_args["title"]))
+    table.mergeCells("A1:" + letters[-1] + "1")
+    table.setAlignment("A1", "center|vcenter")
+    table.setStyle("A1", "bold")
 for letter, (title, width) in zip(letters, columns):
-    table.set(letter + "1", str(title))
+    table.set(letter + str(top), str(title))
     table.setColumnWidth(letter, int(width))
-for r, row in enumerate(rows, start=2):
+for r, row in enumerate(rows, start=top + 1):
     for letter, value in zip(letters, row):
         text = str(value)
         table.set(letter + str(r), "'" + text if text[:1] in ("=", "+", "-") else text)
-table.setStyle("A1:" + letters[-1] + "1", "bold")
+table.setStyle("A" + str(top) + ":" + letters[-1] + str(top), "bold")
 doc.recompute()
 view = None
 for v in page.Views:
@@ -1982,7 +1998,7 @@ view.TextSize = 16
 # LineWidth counts in pixels (0.2646 mm): the default 0.35 drew 0.09 mm borders; 1.2 → 0.32 mm (thin line)
 view.LineWidth = 1.2
 view.CellStart = "A1"
-view.CellEnd = letters[-1] + str(len(rows) + 1)
+view.CellEnd = letters[-1] + str(len(rows) + top)
 doc.recompute()
 w, h = _svg_size(view)
 where = _args["where"]
@@ -3102,6 +3118,7 @@ def register_drawing_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -
         page_name: str,
         revisions: list[dict[str, str]],
         headers: list[str] | None = None,
+        title: str | None = None,
         doc_name: str | None = None,
     ) -> dict[str, Any]:
         """Add the revision block in the sheet's top-right corner.
@@ -3114,6 +3131,8 @@ def register_drawing_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -
             headers: The five column titles in the drawing's language, e.g.
                 ["ZONE", "RÉV.", "DESCRIPTION", "DATE", "APPROUVÉ"];
                 English if None.
+            title: A title row above the column titles, as in Y14.35
+                ("REVISIONS", "RÉVISIONS"); none if None.
             doc_name: Document. Uses active document if None.
 
         Returns:
@@ -3131,7 +3150,7 @@ def register_drawing_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -
         if len(titles) != 5:
             raise ValueError("headers needs five titles: zone, revision, description, date, approved")
         table = await run(_ADD_TABLE, "Adding the revision table failed", page_name=page_name, rows=rows,
-                          columns=list(zip(titles, (50, 45, 280, 100, 100))),
+                          columns=list(zip(titles, (50, 45, 280, 100, 100))), title=title,
                           sheet_name="Revisions", where="top_right", doc_name=doc_name)
         await run(_FILL_TITLE_BLOCK, "Setting the revision failed", page_name=page_name,
                   fields={"revision": revisions[-1]["rev"]}, aliases=TITLE_FIELDS, lenient=True, doc_name=doc_name)
