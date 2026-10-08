@@ -76,14 +76,16 @@ def _required_args(fn: Any) -> dict[str, Any]:
             if p.default is inspect.Parameter.empty}
     if fn.__name__ == "add_gdt_frame":
         args["datums"] = ["A"]
+    if fn.__name__ == "add_surface_texture":
+        args.update(view_name="V", point=[0.0, 0.0, 0.0], leader=[6.0, -12.0], value="Ra 1.6")
     if "doc_name" in params:
         args["doc_name"] = "Doc"  # a named document is what a client usually passes
     return args
 
 
-def test_registers_97_tools_and_skips_the_redundant_ones() -> None:
+def test_registers_99_tools_and_skips_the_redundant_ones() -> None:
     tools = _modelling_tools(RecordingBridge())
-    assert len(tools) == 97
+    assert len(tools) == 99
     assert not SKIPPED_TOOLS & set(tools)
 
 
@@ -91,7 +93,7 @@ def test_server_registers_modelling_tools_beside_the_originals() -> None:
     from freecad_mcp import server
 
     names = [t.name for t in asyncio.run(server.mcp.list_tools())]
-    assert len(names) == len(set(names)) == 114
+    assert len(names) == len(set(names)) == 116
     assert {"execute_code", "get_view", "pad_sketch", "constrain_angle", "spreadsheet_bind_property",
             "export_step", "export_dxf", "get_topology", "mass_properties", "undo",
             "create_drawing", "add_dimension", "check_drawing"} <= set(names)
