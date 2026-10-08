@@ -186,12 +186,13 @@ def _hole_text(hole, count, spec):
         elif spec.get("thread_depth"):
             # MIN: a full-thread depth is a floor (the screw needs at least that much), its ceiling is the
             # drilled depth; ±0.2 from the general tolerance would reject good parts
+            # MIN follows the millimetre value it qualifies, before the reference inches, and again inside
+            # the brackets: "↧ 7 [.276] MIN" read as an untoleranced 7 under ±0.2 (MEP-101 r4)
             if spec.get("thread_depth_min"):
-                first += " ↧ " + _fmt(spec["thread_depth"], _decimals(spec["thread_depth"], 2))
+                first += " ↧ " + _fmt(spec["thread_depth"], _decimals(spec["thread_depth"], 2)) + " MIN"
                 if spec.get("dual", True):
                     q = 10 ** spec.get("decimals_in", 3)
-                    first += " [" + _fmt(math.ceil(spec["thread_depth"] / 25.4 * q - 1e-9) / q, spec.get("decimals_in", 3), False) + "]"
-                first += " MIN"
+                    first += " [" + _fmt(math.ceil(spec["thread_depth"] / 25.4 * q - 1e-9) / q, spec.get("decimals_in", 3), False) + " MIN]"
             else:
                 first += " ↧ " + size(spec["thread_depth"])
             if spec["thread_depth"] >= hole["depth"] - 1e-9:
@@ -1974,7 +1975,6 @@ if top == 2:
     table.set("A1", str(_args["title"]))
     table.mergeCells("A1:" + letters[-1] + "1")
     table.setAlignment("A1", "center|vcenter")
-    table.setStyle("A1", "bold")
 for letter, (title, width) in zip(letters, columns):
     table.set(letter + str(top), str(title))
     table.setColumnWidth(letter, int(width))
@@ -1982,7 +1982,8 @@ for r, row in enumerate(rows, start=top + 1):
     for letter, value in zip(letters, row):
         text = str(value)
         table.set(letter + str(r), "'" + text if text[:1] in ("=", "+", "-") else text)
-table.setStyle("A" + str(top) + ":" + letters[-1] + str(top), "bold")
+# No bold: osifont has none, and Qt fakes it by printing each text twice 0.34 mm apart, which reads as
+# hollow doubled letters (MEP-101 r4). Titles stay in the sheet's single-stroke lettering (Y14.2).
 doc.recompute()
 view = None
 for v in page.Views:
@@ -2784,7 +2785,7 @@ def register_drawing_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -
                 [4.15, 4.30]); otherwise the general tolerance applies to the
                 drill and may leave it below the minor diameter.
             thread_depth_min: Write the full-thread depth as a minimum
-                ("↧ 7 [.276] MIN", inches rounded up); the drilled depth
+                ("↧ 7 MIN [.276 MIN]", inches rounded up); the drilled depth
                 bounds it from above.
             doc_name: Document. Uses active document if None.
 

@@ -401,7 +401,7 @@ def test_a_full_thread_depth_can_be_a_minimum() -> None:
     hole = dict(diameter=4.2, through=False, depth=9.0)
     spec = dict(dual=True, decimals_in=3, thread="M5×0.8-6H", thread_depth=7.0, thread_depth_min=True,
                 drill_limits=[4.15, 4.30])
-    assert _hole_text(hole, 2, spec).split("\n")[0] == "2X M5×0.8-6H ↧ 7 [.276] MIN"
+    assert _hole_text(hole, 2, spec).split("\n")[0] == "2X M5×0.8-6H ↧ 7 MIN [.276 MIN]"
 
 
 def test_revision_table_can_carry_a_title_row() -> None:
