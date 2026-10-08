@@ -185,6 +185,10 @@ def _hole_text(hole, count, spec):
             first += " THRU"
         elif spec.get("thread_depth"):
             first += " ↧ " + size(spec["thread_depth"])
+            if spec["thread_depth"] >= hole["depth"] - 1e-9:
+                raise ValueError("The full-thread depth must stay above the drilled depth of a blind hole")
+            # The tap drill and its depth bound the floor left under a blind thread
+            first += "\n⌀" + size(hole["diameter"]) + " ↧ " + size(hole["depth"])
         else:
             raise ValueError("A blind thread needs its full-thread depth (thread_depth)")
     else:
@@ -2512,7 +2516,8 @@ def register_drawing_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -
             diameter: Only the holes of this modelled diameter (mm); all if None.
             thread: Thread designation that replaces the drill size, e.g.
                 "M5×0.8-6H" or "1/4-20 UNC-2B" (needs ``diameter``).
-            thread_depth: Full-thread depth in mm for a blind thread.
+            thread_depth: Full-thread depth in mm for a blind thread; the tap drill
+                and its depth follow on a second line, which bound the floor.
             tolerance: Symmetric tolerance of the hole size (±), in mm.
             upper: Upper deviation of the hole size (with lower).
             lower: Lower deviation of the hole size (with upper).

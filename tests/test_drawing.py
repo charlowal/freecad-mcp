@@ -99,8 +99,11 @@ def test_hole_callout_depths_stay_untoleranced() -> None:
 def test_thread_callout_replaces_the_drill_size() -> None:
     spec = {"dual": True, "decimals_in": 3, "thread": "M5×0.8-6H"}
     assert _hole_text({"diameter": 4.2, "through": True}, 2, spec) == "2X M5×0.8-6H THRU"
-    spec["thread_depth"] = 10.0
-    assert _hole_text({"diameter": 4.2, "through": False, "depth": 13.0}, 2, spec) == "2X M5×0.8-6H ↧ 10 [.394]"
+    spec["thread_depth"] = 7.0
+    assert _hole_text({"diameter": 4.2, "through": False, "depth": 9.0}, 2, spec) == "2X M5×0.8-6H ↧ 7 [.276]\n⌀4.2 [.165] ↧ 9 [.354]"
+    spec["thread_depth"] = 9.0
+    with pytest.raises(ValueError, match="above the drilled depth"):
+        _hole_text({"diameter": 4.2, "through": False, "depth": 9.0}, 2, spec)
     del spec["thread_depth"]
     with pytest.raises(ValueError, match="full-thread depth"):
         _hole_text({"diameter": 4.2, "through": False, "depth": 13.0}, 2, spec)
