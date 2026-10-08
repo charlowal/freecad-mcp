@@ -1056,10 +1056,10 @@ _NO_MODIFIER = {"circularity", "cylindricity", "profile_of_a_line", "profile_of_
                 "circular_runout", "total_runout", "concentricity", "symmetry"}
 _DATUM_LETTER = re.compile(r"^(?![IOQ]$)[A-HJ-NPR-Z]{1,2}$")
 _FRAME_HEIGHT = 8.0
-# SVG font-size is the body size; osifont capitals are 0.737 of it. ASME Y14.2 asks 3 mm capitals
-# on dimensions and notes: body 4.2 gives 3.1 mm, a margin over the ±1.5 % TechDraw puts on a
-# symbol's scale (measured on the PDF).
-_TEXT = 4.2
+# SVG font-size is the body size; osifont capitals are 0.737 of it. Body 4.7 gives 3.46 mm capitals, the
+# height TechDraw draws dimension and note text at 3.5: one lettering height on the whole sheet (Y14.2;
+# MEP-101 r6 measured 3.04–3.17 mm in frames against 3.46 in dimensions with the former 4.2).
+_TEXT = 4.7
 _BASELINE = _FRAME_HEIGHT / 2 + 0.737 * _TEXT / 2
 
 
@@ -1227,7 +1227,7 @@ _REMOVAL = ("required", "prohibited", "any")
 
 def surface_texture_svg(value: str, removal: str = "required") -> tuple[str, tuple[float, float], float]:
     """Surface texture symbol per ASME Y14.36-2018 / ISO 1302: legs at 60°, short leg 1.4 h, long leg 3 h
-    for h = 3 mm capitals; a bar closes the V when material removal is required, a circle sits in it when
+    for the sheet's lettering height h; a bar closes the V when material removal is required, a circle sits in it when
     removal is prohibited; the requirement ("Ra 1.6") is written under the extension of the long leg.
 
     Returns the SVG, the vertex as an offset from the symbol's centre (sheet mm, y up) and the width.
@@ -1237,7 +1237,7 @@ def surface_texture_svg(value: str, removal: str = "required") -> tuple[str, tup
     value = value.strip()
     if not value:
         raise ValueError("Give the requirement, e.g. 'Ra 1.6'")
-    h = 3.0
+    h = round(0.737 * _TEXT, 2)                  # the sheet's lettering height (capitals)
     h1, h2 = 1.4 * h, 3.0 * h
     c = 1 / math.tan(math.radians(60))
     run = _text_width(value) + 1.6
@@ -1996,9 +1996,9 @@ if view is None:
     view = doc.addObject("TechDraw::DrawViewSpreadsheet", name + "View")
     page.addView(view)
     view.Source = table
-# TextSize counts in 0.2635 mm: 16 gives a 4.2 mm body, 3.1 mm osifont capitals (ASME Y14.2: 3 mm at least);
-# the default 12 drew 2.3 mm capitals
-view.TextSize = 16
+# TextSize counts in about 0.25 mm: 18.6 draws 3.46 mm osifont capitals (measured on the PDF: 17.8 drew 3.31),
+# the height of the dimensions and notes (one lettering height, Y14.2); the default 12 drew 2.3 mm capitals
+view.TextSize = 18.6
 # LineWidth counts in pixels (0.2646 mm): the default 0.35 drew 0.09 mm borders; 1.2 → 0.32 mm (thin line)
 view.LineWidth = 1.2
 view.CellStart = "A1"
