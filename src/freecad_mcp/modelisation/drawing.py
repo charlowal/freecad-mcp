@@ -1980,6 +1980,7 @@ if top == 2:
     table.setAlignment("A1", "center|vcenter")
 for letter, (title, width) in zip(letters, columns):
     table.set(letter + str(top), str(title))
+    table.setAlignment(letter + str(top), "center|vcenter")    # column titles centred over their column
     table.setColumnWidth(letter, int(width))
 for r, row in enumerate(rows, start=top + 1):
     for letter, value in zip(letters, row):
@@ -3154,7 +3155,7 @@ def register_drawing_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -
         if len(titles) != 5:
             raise ValueError("headers needs five titles: zone, revision, description, date, approved")
         table = await run(_ADD_TABLE, "Adding the revision table failed", page_name=page_name, rows=rows,
-                          columns=list(zip(titles, (50, 45, 280, 100, 100))), title=title,
+                          columns=list(zip(titles, (60, 50, 280, 100, 100))), title=title,
                           sheet_name="Revisions", where="top_right", doc_name=doc_name)
         await run(_FILL_TITLE_BLOCK, "Setting the revision failed", page_name=page_name,
                   fields={"revision": revisions[-1]["rev"]}, aliases=TITLE_FIELDS, lenient=True, doc_name=doc_name)
