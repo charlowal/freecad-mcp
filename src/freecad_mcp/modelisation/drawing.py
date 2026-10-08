@@ -184,7 +184,16 @@ def _hole_text(hole, count, spec):
         if hole["through"]:
             first += " THRU"
         elif spec.get("thread_depth"):
-            first += " ↧ " + size(spec["thread_depth"])
+            # MIN: a full-thread depth is a floor (the screw needs at least that much), its ceiling is the
+            # drilled depth; ±0.2 from the general tolerance would reject good parts
+            if spec.get("thread_depth_min"):
+                first += " ↧ " + _fmt(spec["thread_depth"], _decimals(spec["thread_depth"], 2))
+                if spec.get("dual", True):
+                    q = 10 ** spec.get("decimals_in", 3)
+                    first += " [" + _fmt(math.ceil(spec["thread_depth"] / 25.4 * q - 1e-9) / q, spec.get("decimals_in", 3), False) + "]"
+                first += " MIN"
+            else:
+                first += " ↧ " + size(spec["thread_depth"])
             if spec["thread_depth"] >= hole["depth"] - 1e-9:
                 raise ValueError("The full-thread depth must stay above the drilled depth of a blind hole")
             # The tap drill and its depth bound the floor left under a blind thread. Under the general
@@ -1712,7 +1721,7 @@ if _args.get("diameter") is not None:
                          + ", ".join(sorted(set("%g" % g["holes"][0]["diameter"] for g in groups))))
     groups = wanted
 spec = dict(dual=_args["dual"], decimals_in=_args["decimals_in"], kind="hole", note=_args.get("note") or "")
-for key in ("thread", "thread_depth", "plus", "minus", "limits", "drill_limits"):
+for key in ("thread", "thread_depth", "thread_depth_min", "plus", "minus", "limits", "drill_limits"):
     if _args.get(key) is not None and _args.get(key) is not False:
         spec[key] = _args[key]
 if _args.get("csink") is False:
@@ -1970,6 +1979,8 @@ if view is None:
 # TextSize counts in 0.2635 mm: 16 gives a 4.2 mm body, 3.1 mm osifont capitals (ASME Y14.2: 3 mm at least);
 # the default 12 drew 2.3 mm capitals
 view.TextSize = 16
+# LineWidth counts in pixels (0.2646 mm): the default 0.35 drew 0.09 mm borders; 1.2 → 0.32 mm (thin line)
+view.LineWidth = 1.2
 view.CellStart = "A1"
 view.CellEnd = letters[-1] + str(len(rows) + 1)
 doc.recompute()
@@ -2717,6 +2728,7 @@ def register_drawing_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -
         note: str | None = None,
         hole_at: list[float] | None = None,
         drill_limits: list[float] | None = None,
+        thread_depth_min: bool = False,
         doc_name: str | None = None,
     ) -> dict[str, Any]:
         """Call out every hole seen end-on in a view, from the 3D geometry.
@@ -2755,6 +2767,9 @@ def register_drawing_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -
                 thread's minor diameter (M5×0.8-6H: 4.134–4.334, so
                 [4.15, 4.30]); otherwise the general tolerance applies to the
                 drill and may leave it below the minor diameter.
+            thread_depth_min: Write the full-thread depth as a minimum
+                ("↧ 7 [.276] MIN", inches rounded up); the drilled depth
+                bounds it from above.
             doc_name: Document. Uses active document if None.
 
         Each callout is a one-line dimension (its leader touches that line)
@@ -2778,7 +2793,7 @@ def register_drawing_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -
                          object_names=object_names, diameter=diameter, thread=thread, thread_depth=thread_depth,
                          plus=plus, minus=minus, limits=limits, csink=countersink, dual=dual,
                          decimals_in=decimals_in, offset=offset, note=note, hole_at=hole_at,
-                         drill_limits=drill_limits, doc_name=doc_name)
+                         drill_limits=drill_limits, thread_depth_min=thread_depth_min or None, doc_name=doc_name)
 
     @mcp.tool()
     async def add_hole_table(
