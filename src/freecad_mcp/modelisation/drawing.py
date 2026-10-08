@@ -193,7 +193,7 @@ def _hole_text(hole, count, spec):
     lines = [first]
     if hole.get("cbore_diameter"):
         lines.append("⌴ ⌀" + size(hole["cbore_diameter"]) + " ↧ " + size(hole["cbore_depth"]))
-    if hole.get("csink_diameter"):
+    if hole.get("csink_diameter") and spec.get("csink", True):
         angle = hole["csink_angle"]
         lines.append("⌵ ⌀" + size(hole["csink_diameter"]) + " X " + _fmt(angle, _decimals(angle, 1)) + "°")
     if spec.get("note"):
@@ -980,7 +980,10 @@ _NO_MODIFIER = {"circularity", "cylindricity", "profile_of_a_line", "profile_of_
                 "circular_runout", "total_runout", "concentricity", "symmetry"}
 _DATUM_LETTER = re.compile(r"^(?![IOQ]$)[A-HJ-NPR-Z]{1,2}$")
 _FRAME_HEIGHT = 8.0
-_TEXT = 3.5
+# SVG font-size is the body size; osifont capitals are 0.737 of it. ASME Y14.2 asks 3 mm capitals
+# on dimensions and notes: body 4.1 (the old 3.5 drew 2.6 mm capitals, measured on the PDF).
+_TEXT = 4.1
+_BASELINE = _FRAME_HEIGHT / 2 + 0.737 * _TEXT / 2
 
 
 def _text_width(text: str, size: float = _TEXT) -> float:
@@ -989,7 +992,7 @@ def _text_width(text: str, size: float = _TEXT) -> float:
 
 def _modifier_svg(x: float, letter: str) -> str:
     return (f'<circle cx="{x:.2f}" cy="4" r="1.9" fill="none" stroke="black" stroke-width="0.3"/>'
-            f'<text x="{x:.2f}" y="5.0" font-family="osifont" font-size="2.7" text-anchor="middle">{letter}</text>')
+            f'<text x="{x:.2f}" y="5.05" font-family="osifont" font-size="2.9" text-anchor="middle">{letter}</text>')
 
 
 def _split_datum(ref: str) -> tuple[str, str | None]:
@@ -1070,17 +1073,17 @@ def gdt_frame_svg(characteristic: str, tolerance: str, diameter_zone: bool = Fal
         parts.append(f'<path d="M{x:.2f} 0 V{h:.2f}"/>')
     texts = [f'<g fill="none" stroke="black" stroke-width="0.3" stroke-linejoin="round">{_GDT_SYMBOLS[characteristic]}</g>']
     x = cells[0] + 1.5
-    texts.append(f'<text x="{x:.2f}" y="5.25" font-family="osifont" font-size="{_TEXT}">{escape(tol_text)}</text>')
+    texts.append(f'<text x="{x:.2f}" y="{_BASELINE:.2f}" font-family="osifont" font-size="{_TEXT}">{escape(tol_text)}</text>')
     after = cells[0] + 1.5 + _text_width(tol_text)
     if material_condition:
         texts.append(_modifier_svg(after + 2.3, material_condition.upper()))
         after += 4.6
     if projected:
         texts.append(_modifier_svg(after + 2.3, "P"))
-        texts.append(f'<text x="{after + 5.2:.2f}" y="5.25" font-family="osifont" font-size="{_TEXT}">{escape(projected)}</text>')
+        texts.append(f'<text x="{after + 5.2:.2f}" y="{_BASELINE:.2f}" font-family="osifont" font-size="{_TEXT}">{escape(projected)}</text>')
     x = cells[0] + cells[1]
     for (letter, mod), cell in zip(parsed, cells[2:]):
-        texts.append(f'<text x="{x + 1.5:.2f}" y="5.25" font-family="osifont" font-size="{_TEXT}">{letter}</text>')
+        texts.append(f'<text x="{x + 1.5:.2f}" y="{_BASELINE:.2f}" font-family="osifont" font-size="{_TEXT}">{letter}</text>')
         if mod:
             texts.append(_modifier_svg(x + cell - 2.8, mod))
         x += cell
@@ -1129,7 +1132,7 @@ def datum_symbol_svg(letter: str, side: str = "up", stem: float = 4.0) -> tuple[
            f'fill="none" stroke="black" stroke-width="0.35"/>'
            f'<path d="{line}" fill="none" stroke="black" stroke-width="0.35"/>'
            f'<path d="{triangle}" fill="black" stroke="black" stroke-width="0.2"/>'
-           f'<text x="{bx + box / 2:.2f}" y="{by + box / 2 + 1.25:.2f}" font-family="osifont" font-size="{_TEXT}" '
+           f'<text x="{bx + box / 2:.2f}" y="{by + box / 2 + 0.737 * _TEXT / 2:.2f}" font-family="osifont" font-size="{_TEXT}" '
            f'text-anchor="middle">{letter}</text></svg>')
     # SVG y runs down: turn the base point into an offset from the centre, y up
     return svg, (base[0] - w / 2, h / 2 - base[1])
@@ -1596,6 +1599,8 @@ spec = dict(dual=_args["dual"], decimals_in=_args["decimals_in"], kind="hole", n
 for key in ("thread", "thread_depth", "plus", "minus", "limits"):
     if _args.get(key) is not None and _args.get(key) is not False:
         spec[key] = _args[key]
+if _args.get("csink") is False:
+    spec["csink"] = False
 made, missed = [], []
 s = view.getScale()
 for g in groups:
@@ -2486,6 +2491,7 @@ def register_drawing_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -
         upper: float | None = None,
         lower: float | None = None,
         limits: bool = False,
+        countersink: bool = True,
         dual: bool = True,
         decimals_in: int = 3,
         offset: float = 8.0,
@@ -2511,6 +2517,9 @@ def register_drawing_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -
             upper: Upper deviation of the hole size (with lower).
             lower: Lower deviation of the hole size (with upper).
             limits: Write the size as its limits, "⌀6.6–6.8".
+            countersink: False leaves out the ⌵ line: a 45° edge chamfer at
+                the hole's mouth is found as a 90° countersink, but is called
+                out as a chamfer ("2X 0.5 X 45°") on its own.
             dual: Show inches in brackets after mm.
             decimals_in: Inch decimals.
             offset: Leader length beyond the circle, in sheet mm.
@@ -2531,8 +2540,8 @@ def register_drawing_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -
             raise ValueError("limits needs a tolerance (tolerance, or upper and lower)")
         return await run(_ADD_HOLE_CALLOUTS, "Adding hole callouts failed", view_name=view_name,
                          object_names=object_names, diameter=diameter, thread=thread, thread_depth=thread_depth,
-                         plus=plus, minus=minus, limits=limits, dual=dual, decimals_in=decimals_in,
-                         offset=offset, note=note, doc_name=doc_name)
+                         plus=plus, minus=minus, limits=limits, csink=countersink, dual=dual,
+                         decimals_in=decimals_in, offset=offset, note=note, doc_name=doc_name)
 
     @mcp.tool()
     async def add_hole_table(

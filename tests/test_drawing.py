@@ -286,3 +286,11 @@ def test_weld_symbol_maps_sides_to_aws_files() -> None:
     assert '"file": "filletDown.svg"' in script and '"file": "VUp.svg"' in script
     with pytest.raises(ToolError, match="Unknown weld"):
         _run("add_weld_symbol", view_name="V", point=[0, 0, 0], arrow_side="J")
+
+
+def test_a_mouth_chamfer_can_leave_the_countersink_line_out() -> None:
+    hole = {"diameter": 20.03, "through": True, "csink_diameter": 21.03, "csink_angle": 90.0}
+    spec = {"dual": True, "decimals_in": 3, "plus": 0.01, "minus": -0.01, "limits": True}
+    assert _hole_text(hole, 1, spec) == "⌀20.02–20.04 [.7882–.7889] THRU\n⌵ ⌀21.03 [.828] X 90°"
+    spec["csink"] = False
+    assert _hole_text(hole, 1, spec) == "⌀20.02–20.04 [.7882–.7889] THRU"
