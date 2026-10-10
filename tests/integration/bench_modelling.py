@@ -250,6 +250,61 @@ async def bench_constraints() -> None:
     ok, reply = await call("delete_sketch_constraint", sketch_name=s, constraint_index=0, doc_name=D)
     after = sketch_state(D, s)["cons"]
     judge(G, "delete_sketch_constraint", ok, reply, after == before - 1, f"{before} -> {after}", f"{before} -> {after}")
+    s = await fresh((L, dict(x1=0, y1=0, x2=10, y2=0)), (L, dict(x1=10.5, y1=0.5, x2=15, y2=8)))
+    ok, reply = await call("constrain_coincident", sketch_name=s, geometry1=0, point1=2, geometry2=1, point2=1, doc_name=D)
+    moved = reply.get("moved_points", []) if ok else []
+    judge(G, "constrain_coincident (moved points)", ok, reply, any(m[:2] in ([0, 2], [1, 1]) for m in moved),
+          f"reports {len(moved)} moved points", f"no moved point reported: {str(reply)[:110]}")
+    close(D)
+
+
+# --------------------------------------------------------------------------- 2b. a profile with an arc
+
+async def bench_profile() -> None:
+    """The arch under a wing: an arc drawn right to left between two lines.
+
+    The arc runs counter-clockwise, so its start (point 1) is the right end.
+    Chaining coincidences in drawing order swaps the ids and the solver
+    stretches both lines under the arc (Support_X1, 10 oct.).
+    """
+    G, D = "profile", "BenchProfile"
+    b = await new_body(D)
+    s = await sketch(D, b, plane="XZ_Plane")
+    await T["add_sketch_line"](sketch_name=s, x1=-8, y1=0, x2=25, y2=0, doc_name=D)
+    ok, reply = await call("add_sketch_arc", sketch_name=s, center_x=107.5, center_y=-180.062, radius=198.062,
+                           start_angle=65.384, end_angle=114.616, doc_name=D)
+    near = lambda p, x, y: p is not None and math.hypot(p[0] - x, p[1] - y) < 0.01  # noqa: E731
+    judge(G, "add_sketch_arc (end points)", ok, reply,
+          ok and near(reply.get("start_point"), 190, 0) and near(reply.get("end_point"), 25, 0),
+          "start (190, 0), end (25, 0)", f"points {reply.get('start_point') if ok else '-'} / {reply.get('end_point') if ok else '-'}")
+    await T["add_sketch_line"](sketch_name=s, x1=190, y1=0, x2=217, y2=0, doc_name=D)
+    before = sketch_state(D, s)
+    ok, reply = await call("constrain_coincident", sketch_name=s, geometry1=0, point1=2, geometry2=1, point2=1, doc_name=D)
+    after = sketch_state(D, s)
+    unchanged = after["cons"] == before["cons"] and after["g"] == before["g"]
+    if ok:
+        note(G, "constrain_coincident (swapped ids)", "FALSE_SUCCESS", f"accepted: {str(reply)[:120]}")
+    else:
+        note(G, "constrain_coincident (swapped ids)", "OK" if "swapped" in str(reply) and unchanged else "ERROR",
+             f"refused, sketch unchanged={unchanged}: {str(reply)[:90]}")
+    ok, reply = await call("constrain_coincident", sketch_name=s, geometry1=0, point1=2, geometry2=1, point2=2, doc_name=D)
+    after = sketch_state(D, s)
+    judge(G, "constrain_coincident (right ids)", ok, reply, after["cons"] == before["cons"] + 1 and "moved_points" not in reply,
+          "added, nothing moved", f"{str(reply)[:120]}")
+    await T["constrain_coincident"](sketch_name=s, geometry1=1, point1=1, geometry2=2, point2=1, doc_name=D)
+    ok, reply = await call("get_sketch_info", sketch_name=s, doc_name=D)
+    geo = reply.get("geometry", []) if ok else []
+    open_ends = [e[:2] for e in reply.get("open_ends", [])] if ok else []
+    judge(G, "get_sketch_info (coordinates)", ok, reply,
+          len(geo) == 3 and near(geo[1].get("start"), 190, 0) and geo[1].get("radius") == 198.062
+          and sorted(open_ends) == [[0, 1], [2, 2]] and reply.get("overlapping_lines") == [],
+          "arc start (190, 0), open ends at -8 and 217, no overlap", f"{json.dumps(reply, default=str)[:140]}")
+    await T["add_sketch_line"](sketch_name=s, x1=25, y1=0, x2=217, y2=0, doc_name=D)
+    ok, reply = await call("get_sketch_info", sketch_name=s, doc_name=D)
+    overlaps = reply.get("overlapping_lines", []) if ok else []
+    judge(G, "get_sketch_info (overlap)", ok, reply,
+          len(overlaps) == 1 and overlaps[0]["lines"] == [2, 3] and abs(overlaps[0]["shared_length"] - 27) < 0.01,
+          "lines 2 and 3 share 27 mm", f"overlapping_lines={overlaps}")
     close(D)
 
 
@@ -783,7 +838,7 @@ R = _views[0].toPlainText() if _views else None
 
 async def main() -> int:
     report_before = q(REPORT_VIEW)
-    for group in (bench_geometry, bench_constraints, bench_features, bench_spreadsheet, bench_files, bench_inspection, bench_sheetmetal):
+    for group in (bench_geometry, bench_constraints, bench_profile, bench_features, bench_spreadsheet, bench_files, bench_inspection, bench_sheetmetal):
         try:
             await group()
         except Exception as e:  # noqa: BLE001
