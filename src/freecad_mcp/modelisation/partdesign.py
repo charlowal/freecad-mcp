@@ -1281,6 +1281,11 @@ _result_ = {{
     ) -> dict[str, Any]:
         """Add an arc to a sketch.
 
+        The arc runs counter-clockwise from start_angle to end_angle, so its
+        point 1 (start) sits at start_angle and its point 2 (end) at
+        end_angle, whatever order the contour is drawn in. Use the returned
+        coordinates to pick the point ids of coincident constraints.
+
         Args:
             sketch_name: Name of the sketch to add arc to.
             center_x: X coordinate of center.
@@ -1294,6 +1299,9 @@ _result_ = {{
             Dictionary with geometry info:
                 - geometry_index: Index of the added arc
                 - geometry_count: Total geometry elements
+                - start_point: [x, y] of point 1
+                - end_point: [x, y] of point 2
+                - center: [x, y] of point 3
         """
         bridge = await get_bridge()
 
@@ -1325,9 +1333,16 @@ except Exception:
     doc.abortTransaction()
     raise
 
+def _xy(pos):
+    p = sketch.getPoint(idx, pos)
+    return [round(p.x, 4), round(p.y, 4)]
+
 _result_ = {{
     "geometry_index": idx,
     "geometry_count": sketch.GeometryCount,
+    "start_point": _xy(1),
+    "end_point": _xy(2),
+    "center": _xy(3),
 }}
 """
         result = await bridge.execute_python(code)
@@ -2480,10 +2495,18 @@ except Exception:
                 Angles are in degrees.
             doc_name: Document containing the sketch. Uses active document if None.
 
+        A coincidence between two points that are apart, while another point
+        of the same element sits exactly on the target, is refused: the point
+        ids are almost certainly swapped (an arc's point 1 is at its start
+        angle, not where the contour enters it). Nothing is changed then.
+
         Returns:
             Dictionary with constraint info:
                 - constraint_index: Index of the added constraint
                 - constraint_count: Total constraint count
+                - moved_points: points the solver moved by more than 0.001 mm
+                  to satisfy the constraint, as [geometry, point, [x, y] before,
+                  [x, y] after] (only when some moved)
         """
         bridge = await get_bridge()
 
@@ -2544,6 +2567,37 @@ try:
     else:
         raise ValueError(f"Unknown constraint type: {{ctype}}")
 
+    def _point(g, p):
+        try:
+            return sketch.getPoint(g, p)
+        except Exception:
+            return None
+
+    def _xy(v):
+        return [round(v.x, 4), round(v.y, 4)]
+
+    if ctype == "Coincident" and p1 >= 0 and p2 >= 0:
+        a, b = _point(g1, p1), _point(g2, p2)
+        if a is not None and b is not None and (a - b).Length > 1e-3:
+            for g, p, target in ((g2, p2, a), (g1, p1, b)):
+                for q in (1, 2, 3):
+                    c = _point(g, q)
+                    if q != p and c is not None and (c - target).Length < 1e-3:
+                        raise ValueError(
+                            f"Point {{p1}} of geometry {{g1}} is at {{_xy(a)}} and point {{p2}} of geometry {{g2}} "
+                            f"is at {{_xy(b)}}, {{(a - b).Length:.3f}} mm apart, but point {{q}} of geometry {{g}} "
+                            f"is already exactly at {{_xy(target)}}: the point ids look swapped "
+                            "(1 = start, 2 = end, 3 = center; an arc runs counter-clockwise from its "
+                            "start angle). Nothing was changed. Read the coordinates with get_sketch_info."
+                        )
+
+    before = {{}}
+    for g in range(sketch.GeometryCount):
+        for p in (1, 2, 3):
+            v = _point(g, p)
+            if v is not None:
+                before[(g, p)] = v
+
     idx = sketch.addConstraint(constraint)
     doc.recompute()
     doc.commitTransaction()
@@ -2552,6 +2606,13 @@ try:
         "constraint_index": idx,
         "constraint_count": sketch.ConstraintCount,
     }}
+    moved = []
+    for (g, p), v in before.items():
+        w = _point(g, p)
+        if w is not None and (w - v).Length > 1e-3:
+            moved.append([g, p, _xy(v), _xy(w)])
+    if moved:
+        _result_["moved_points"] = moved[:12]
 except Exception:
     doc.abortTransaction()
     raise
@@ -3052,12 +3113,18 @@ except Exception:
     async def get_sketch_info(
         sketch_name: str,
         doc_name: str | None = None,
+        geometry_limit: int = 100,
     ) -> dict[str, Any]:
-        """Get detailed information about a sketch.
+        """Get detailed information about a sketch, with the coordinates of every element.
+
+        Read this after drawing and constraining a profile: the counts alone
+        cannot show a line the solver stretched under an arc, or an open end.
 
         Args:
             sketch_name: Name of the sketch.
             doc_name: Document containing the sketch. Uses active document if None.
+            geometry_limit: Most elements listed in "geometry" (the checks
+                below always cover the whole sketch).
 
         Returns:
             Dictionary with sketch information:
@@ -3067,14 +3134,79 @@ except Exception:
                 - external_geometry_count: Number of external geometry references
                 - fully_constrained: Whether sketch is fully constrained
                 - dof: Degrees of freedom remaining
+                - geometry: one entry per element, in index order: type,
+                  construction flag, and the [x, y] of its points (start =
+                  point 1, end = point 2, center = point 3; an arc runs
+                  counter-clockwise from start to end), plus radius and
+                  angles for arcs and circles
+                - wires: profile wires (construction excluded) and how many are closed
+                - open_ends: element ends that touch no other end
+                - overlapping_lines: pairs of lines lying on top of each other,
+                  with the shared length; a closed profile should have none
         """
         bridge = await get_bridge()
 
         code = f"""
+import math
+
 doc = FreeCAD.ActiveDocument if {doc_name is None} else FreeCAD.getDocument({doc_name!r})
 sketch = doc.getObject({sketch_name!r})
 if sketch is None:
     raise ValueError(f"Sketch not found: {sketch_name!r}")
+
+def _xy(v):
+    return [round(v.x, 4), round(v.y, 4)]
+
+geometry, ends, lines = [], [], []
+for i, g in enumerate(sketch.Geometry):
+    kind = type(g).__name__
+    construction = sketch.getConstruction(i)
+    entry = {{"index": i, "type": kind}}
+    if construction:
+        entry["construction"] = True
+    if hasattr(g, "StartPoint") and hasattr(g, "EndPoint"):
+        entry["start"], entry["end"] = _xy(g.StartPoint), _xy(g.EndPoint)
+        if not construction:
+            ends += [(i, 1, g.StartPoint), (i, 2, g.EndPoint)]
+            if kind == "LineSegment":
+                lines.append((i, g.StartPoint, g.EndPoint))
+    if hasattr(g, "Center"):
+        entry["center"] = _xy(g.Center)
+    if hasattr(g, "Radius"):
+        entry["radius"] = round(g.Radius, 4)
+    if kind == "ArcOfCircle":
+        entry["start_angle"] = round(math.degrees(g.FirstParameter), 4)
+        entry["end_angle"] = round(math.degrees(g.LastParameter), 4)
+    if kind == "Point":
+        entry["at"] = [round(g.X, 4), round(g.Y, 4)]
+    geometry.append(entry)
+
+open_ends = []
+for i, p, v in ends:
+    if not any((j, q) != (i, p) and (w - v).Length < 1e-4 for j, q, w in ends):
+        open_ends.append([i, p, _xy(v)])
+
+overlapping = []
+for n, (i, a0, a1) in enumerate(lines):
+    da = a1 - a0
+    if da.Length < 1e-9:
+        continue
+    u = FreeCAD.Vector(da).normalize()
+    for j, b0, b1 in lines[n + 1:]:
+        db = b1 - b0
+        if db.Length < 1e-9:
+            continue
+        # Shared stretch along line i, then the gap to line j measured at
+        # both ends of that stretch only (a slight tilt far away is not an overlap).
+        s0, s1 = sorted(((b0 - a0).dot(u), (b1 - a0).dot(u)))
+        t0, t1 = max(0.0, s0), min(da.Length, s1)
+        if t1 - t0 <= 1e-3:
+            continue
+        w = FreeCAD.Vector(db).normalize()
+        if all((a0 + u * t - b0).cross(w).Length < 1e-3 for t in (t0, t1)):
+            overlapping.append({{"lines": [i, j], "shared_length": round(t1 - t0, 4)}})
+
+wires = [w for w in sketch.Shape.Wires] if not sketch.Shape.isNull() else []
 
 _result_ = {{
     "name": sketch.Name,
@@ -3084,7 +3216,13 @@ _result_ = {{
     "external_geometry_count": len(sketch.ExternalGeo) - 2,
     "fully_constrained": sketch.FullyConstrained if hasattr(sketch, "FullyConstrained") else None,
     "dof": sketch.solve() if hasattr(sketch, "solve") else None,
+    "geometry": geometry[:{geometry_limit}],
+    "wires": {{"count": len(wires), "closed": sum(1 for w in wires if w.isClosed())}},
+    "open_ends": open_ends[:20],
+    "overlapping_lines": overlapping[:20],
 }}
+if len(geometry) > {geometry_limit}:
+    _result_["geometry_truncated"] = True
 """
         result = await bridge.execute_python(code)
         if result.success:
