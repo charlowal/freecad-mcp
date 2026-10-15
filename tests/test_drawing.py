@@ -4,7 +4,9 @@ The formatting functions are the same source that runs inside FreeCAD, so
 what is asserted here is what the sheet shows.
 """
 
+import ast
 import asyncio
+import json
 import re
 import xml.dom.minidom
 
@@ -21,6 +23,7 @@ from freecad_mcp.modelisation.drawing import (
     check_gdt,
     datum_symbol_svg,
     gdt_frame_svg,
+    surface_texture_svg,
 )
 from freecad_mcp.modelisation import ToolError
 from test_modelisation import RecordingBridge, _modelling_tools
@@ -34,10 +37,14 @@ from test_modelisation import RecordingBridge, _modelling_tools
         (5.5, {"prefix": "R"}, "R5.5 [.217]"),
         (0.5, {}, "0.5 [.020]"),
         (25.4, {}, "25.4 [1.000]"),
-        (120.0, {"plus": 0.1, "minus": -0.1}, "120.0 ±0.1 [4.724 ±.004]"),
-        (50.0, {"plus": 0.2, "minus": -0.1}, "50.0 +0.2/-0.1 [1.969 +.008/-.004]"),
-        (50.0, {"plus": 0.0, "minus": -0.05}, "50.00 0/-0.05 [1.969 +.000/-.002]"),
-        (34.8, {"plus": 0.3, "minus": 0.0}, "34.8 +0.3/0 [1.370 +.012/-.000]"),
+        (120.0, {"plus": 0.1, "minus": -0.1}, "120 ±0.1 [4.721–4.728]"),
+        (50.0, {"plus": 0.2, "minus": -0.1}, "50 +0.2/-0.1 [1.965–1.976]"),
+        (50.0, {"plus": 0.0, "minus": -0.05}, "50 0/-0.05 [1.9666–1.9685]"),
+        (34.8, {"plus": 0.3, "minus": 0.0}, "34.8 +0.3/0 [1.371–1.381]"),
+        (12.0, {"plus": 0.1, "minus": -0.1}, "12 ±0.1 [.469–.476]"),
+        (20.03, {"plus": 0.01, "minus": -0.01, "limits": True, "prefix": "⌀"}, "⌀20.02–20.04 [.7882–.7889]"),
+        (6.7, {"plus": 0.1, "minus": -0.1, "limits": True}, "6.6–6.8 [.260–.267]"),
+        (16.0, {"plus": 0.2, "minus": -0.2}, "16 ±0.2 [.623–.637]"),
         (120.0, {"dual": False}, "120"),
         (120.0, {"decimals_mm": 2, "decimals_in": 4}, "120.00 [4.7244]"),
         (11.0, {"prefix": "2X ⌀", "suffix": " THRU"}, "2X ⌀11 [.433] THRU"),
@@ -80,9 +87,42 @@ def test_hole_callout_note_is_its_last_line() -> None:
     assert _hole_text({"diameter": 4.9, "through": True}, 4, spec) == "4X ⌀4.9 [.193] THRU\nREAM 3/16 IN"
 
 
-def test_hole_callout_ignores_a_dimension_prefix_and_tolerance() -> None:
+def test_hole_callout_ignores_a_dimension_prefix_but_tolerates_the_size() -> None:
     spec = {"dual": True, "decimals_in": 3, "prefix": "X", "plus": 0.1, "minus": -0.1}
-    assert _hole_text({"diameter": 11.0, "through": True}, 1, spec) == "⌀11 [.433] THRU"
+    assert _hole_text({"diameter": 11.0, "through": True}, 1, spec) == "⌀11 ±0.1 [.430–.437] THRU"
+    spec["limits"] = True
+    assert _hole_text({"diameter": 6.7, "through": True}, 4, spec) == "4X ⌀6.6–6.8 [.260–.267] THRU"
+
+
+def test_hole_callout_depths_stay_untoleranced() -> None:
+    spec = {"dual": True, "decimals_in": 3, "plus": 0.1, "minus": -0.1}
+    assert _hole_text({"diameter": 6.6, "through": False, "depth": 12.0}, 1, spec) == "⌀6.6 ±0.1 [.256–.263] ↧ 12 [.472]"
+
+
+def test_thread_callout_replaces_the_drill_size() -> None:
+    spec = {"dual": True, "decimals_in": 3, "thread": "M5×0.8-6H"}
+    assert _hole_text({"diameter": 4.2, "through": True}, 2, spec) == "2X M5×0.8-6H THRU"
+    spec["thread_depth"] = 7.0
+    assert _hole_text({"diameter": 4.2, "through": False, "depth": 9.0}, 2, spec) == "2X M5×0.8-6H ↧ 7 [.276]\n⌀4.2 [.165] ↧ 9 [.354]"
+    spec["thread_depth"] = 9.0
+    with pytest.raises(ValueError, match="above the drilled depth"):
+        _hole_text({"diameter": 4.2, "through": False, "depth": 9.0}, 2, spec)
+    del spec["thread_depth"]
+    with pytest.raises(ValueError, match="full-thread depth"):
+        _hole_text({"diameter": 4.2, "through": False, "depth": 13.0}, 2, spec)
+
+
+@pytest.mark.parametrize(("low", "high"), [(19.9, 20.1), (6.6, 6.8), (20.0, 20.021), (49.95, 50.0), (0.05, 0.06),
+                                           (119.5, 120.5), (3.0, 3.001)])
+def test_inch_limits_never_leave_the_mm_range(low: float, high: float) -> None:
+    from freecad_mcp.modelisation.drawing import _inch_limits
+    lo, hi = (float("0" + t) for t in _inch_limits(low, high, 3).split("–"))
+    assert low <= lo * 25.4 + 1e-9 and hi * 25.4 <= high + 1e-9 and lo <= hi
+
+
+def test_a_tolerance_needs_two_limits() -> None:
+    with pytest.raises(ValueError, match="two different limits"):
+        _dual_text({"plus": 0.0, "minus": 0.0}, 10.0)
 
 
 @pytest.mark.parametrize(("scale", "text"), [(1.0, "1:1"), (0.5, "1:2"), (0.25, "1:4"), (2.0, "2:1"), (0.1, "1:10")])
@@ -252,3 +292,120 @@ def test_weld_symbol_maps_sides_to_aws_files() -> None:
     assert '"file": "filletDown.svg"' in script and '"file": "VUp.svg"' in script
     with pytest.raises(ToolError, match="Unknown weld"):
         _run("add_weld_symbol", view_name="V", point=[0, 0, 0], arrow_side="J")
+
+
+def test_a_mouth_chamfer_can_leave_the_countersink_line_out() -> None:
+    hole = {"diameter": 20.03, "through": True, "csink_diameter": 21.03, "csink_angle": 90.0}
+    spec = {"dual": True, "decimals_in": 3, "plus": 0.01, "minus": -0.01, "limits": True}
+    assert _hole_text(hole, 1, spec) == "⌀20.02–20.04 [.7882–.7889] THRU\n⌵ ⌀21.03 [.828] X 90°"
+    spec["csink"] = False
+    assert _hole_text(hole, 1, spec) == "⌀20.02–20.04 [.7882–.7889] THRU"
+
+
+def test_symbol_text_sizes_survive_techdraw_truncation() -> None:
+    # TechDraw draws a symbol's font-size truncated to an integer: 4.1 became 4 (2.95 mm capitals)
+    svg, _ = gdt_frame_svg("position", "0.2", True, "M", ["A", "B(M)"])
+    root = xml.dom.minidom.parseString(svg).documentElement
+    for t in root.getElementsByTagName("text"):
+        assert t.getAttribute("transform") == "scale(0.1)"
+        size = float(t.getAttribute("font-size"))
+        assert size == int(size)
+    sizes = {float(t.getAttribute("font-size")) / 10 for t in root.getElementsByTagName("text")}
+    assert sizes == {drawing._TEXT, 2.9}
+    assert 0.737 * drawing._TEXT >= 3.05  # 3 mm capitals with the ±1.5 % TechDraw puts on a symbol's scale
+
+
+@pytest.mark.parametrize("removal", ["required", "prohibited", "any"])
+def test_surface_texture_symbol_puts_its_vertex_where_it_says(removal: str) -> None:
+    svg, (ox, oy), width = surface_texture_svg("Ra 1.6", removal)
+    root = xml.dom.minidom.parseString(svg).documentElement
+    w, h = float(root.getAttribute("width")[:-2]), float(root.getAttribute("height")[:-2])
+    assert w == pytest.approx(width, abs=0.01)
+    d = root.getElementsByTagName("path")[0].getAttribute("d")
+    vertex = [float(v) for v in re.findall(r"L([\d.]+) ([\d.]+)", d)[0]]
+    # the returned offset (y up, from the centre) lands on the drawn vertex (y down)
+    assert (w / 2 + ox, h / 2 - oy) == pytest.approx(vertex, abs=0.01)
+    assert ("H" in d.split("M")[-1] and d.count("M") == 2) == (removal == "required")
+    assert bool(root.getElementsByTagName("circle")) == (removal == "prohibited")
+    assert root.getElementsByTagName("text")[0].firstChild.data == "Ra 1.6"
+
+
+def test_surface_texture_goes_right_of_its_leader() -> None:
+    with pytest.raises(ToolError, match="dx ≥ 0"):
+        _run("add_surface_texture", view_name="V", point=[0, 0, 0], value="Ra 1.6", leader=[-5.0, 10.0])
+    with pytest.raises(ValueError, match="removal"):
+        surface_texture_svg("Ra 1.6", "machined")
+    bridge, _ = _run("add_surface_texture", view_name="V", point=[0, 0, 0], value="Ra 1.6", leader=[6.0, -12.0])
+    assert '"Annotates"' in bridge.scripts[0] or "Annotates" in bridge.scripts[0]
+
+
+def _script_args(script: str) -> dict:
+    literal = re.search(r"_args = json.loads\(('(?:[^'\\\\]|\\\\.)*')\)", script).group(1)
+    return json.loads(ast.literal_eval(literal))
+
+
+def test_revision_table_takes_headers_in_the_drawing_language() -> None:
+    bridge, _ = _run("add_revision_table", page_name="Sheet", revisions=[dict(rev="P01", description="PROTOTYPE")],
+                     headers=["ZONE", "RÉV.", "DESCRIPTION", "DATE", "APPROUVÉ"])
+    columns = _script_args(bridge.scripts[0])["columns"]
+    assert [c[0] for c in columns] == ["ZONE", "RÉV.", "DESCRIPTION", "DATE", "APPROUVÉ"]
+    with pytest.raises(ToolError, match="five titles"):
+        _run("add_revision_table", page_name="Sheet", revisions=[dict(rev="P01", description="X")], headers=["A"])
+
+
+def test_hole_callout_can_carry_its_leader_on_a_chosen_hole() -> None:
+    bridge, _ = _run("add_hole_callouts", view_name="V", diameter=6.7, tolerance=0.1, hole_at=[110.0, 10.0, 12.0])
+    assert '"hole_at": [110.0, 10.0, 12.0]' in bridge.scripts[0]
+
+
+def test_beside_puts_a_linear_dimension_in_referencing_style() -> None:
+    bridge, _ = _run("add_dimension", view_name="V", kind="vertical", points=[[0, 0, 0], [0, 0, 12]], beside=True)
+    assert '"beside": true' in bridge.scripts[0]
+    assert 'bool(_args.get("beside"))' in bridge.scripts[0]
+
+
+def test_a_tap_drill_can_be_held_inside_the_minor_diameter() -> None:
+    hole = dict(diameter=4.2, through=False, depth=9.0)
+    spec = dict(dual=True, decimals_in=3, thread="M5×0.8-6H", thread_depth=7.0, drill_limits=[4.15, 4.30])
+    assert _hole_text(hole, 2, spec).split("\n")[:2] == ["2X M5×0.8-6H ↧ 7 [.276]", "⌀4.15–4.30 [.1634–.1692] ↧ 9 [.354]"]
+    with pytest.raises(ValueError, match="outside drill_limits"):
+        _hole_text(dict(hole, diameter=4.1), 2, spec)
+    with pytest.raises(ToolError, match="drill_limits"):
+        _run("add_hole_callouts", view_name="V", diameter=4.2, drill_limits=[4.15, 4.3])
+
+
+def test_zero_position_tolerance_is_allowed_only_at_mmc() -> None:
+    bridge, _ = _run("add_gdt_frame", characteristic="perpendicularity", tolerance=0.0, datums=["A"],
+                     diameter_zone=True, material_condition="M", page_name="Sheet", position=[0.0, 0.0])
+    assert bridge.scripts
+    with pytest.raises(ToolError, match="positive"):
+        _run("add_gdt_frame", characteristic="perpendicularity", tolerance=0.0, datums=["A"], page_name="Sheet",
+             position=[0.0, 0.0])
+
+
+def test_a_surface_texture_symbol_can_stand_beside_a_callout() -> None:
+    bridge, _ = _run("add_surface_texture", value="Ra 0.8", page_name="Sheet", position=[300.0, 200.0])
+    args = _script_args(bridge.scripts[0])
+    assert args["position"] == [300.0, 200.0] and "leader" not in args
+    with pytest.raises(ToolError, match="page_name and position"):
+        _run("add_surface_texture", value="Ra 0.8")
+
+
+def test_line_types_are_written_into_the_file() -> None:
+    bridge, _ = _run("apply_line_types", doc_name="Doc")
+    script = bridge.scripts[0]
+    assert "<CosmeticEdge" in script and "LineNumber" in script and "doc.restore()" in script
+
+
+def test_a_full_thread_depth_can_be_a_minimum() -> None:
+    hole = dict(diameter=4.2, through=False, depth=9.0)
+    spec = dict(dual=True, decimals_in=3, thread="M5×0.8-6H", thread_depth=7.0, thread_depth_min=True,
+                drill_limits=[4.15, 4.30])
+    assert _hole_text(hole, 2, spec).split("\n")[0] == "2X M5×0.8-6H ↧ 7 MIN [.276 MIN]"
+
+
+def test_revision_table_can_carry_a_title_row() -> None:
+    bridge, _ = _run("add_revision_table", page_name="Sheet", revisions=[dict(rev="P01", description="PROTOTYPE")],
+                     title="RÉVISIONS")
+    assert _script_args(bridge.scripts[0])["title"] == "RÉVISIONS"
+    assert 'table.mergeCells("A1:"' in bridge.scripts[0]
