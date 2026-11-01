@@ -53,6 +53,43 @@ Restart Claude Desktop to load the configuration, keep FreeCAD open with its RPC
 server running, and ask Claude to create a model. Connections use `localhost` by
 default.
 
+## Tool profiles
+
+Every tool schema goes into the model's prompt on every turn: all 116 tools
+weigh about 36 900 tokens, which is a lot for a small local model. `--tools`
+(or the `FREECAD_MCP_TOOLS` environment variable) keeps only the groups you
+name, and a `@profile` stands for the groups of one stage of the work:
+
+```bash
+freecad-mcp --tools "@mise-en-plan"
+FREECAD_MCP_TOOLS="@modelisation,-spreadsheet" freecad-mcp
+freecad-mcp --tools "@inspection,code"      # add the code tools on purpose
+```
+
+| Profile | Groups | Tools | Tokens |
+| --- | --- | ---: | ---: |
+| `@modelisation` | core, partdesign, sheetmetal, spreadsheet, files, validation, inspection | 88 | 24 700 |
+| `@mise-en-plan` | core, drawing, files, inspection | 44 | 16 000 |
+| `@inspection` | core, inspection, validation, files, export | 35 | 9 300 |
+
+No profile includes the tools that run Python (`code`): add them with
+`@inspection,code` when the task needs them. An unknown group or profile stops
+the server at startup and the message lists the valid names.
+
+| Group | Tools | Tokens | | Group | Tools | Tokens |
+| --- | ---: | ---: | --- | --- | ---: | ---: |
+| `base` | 17 | 6 137 | | `files` | 7 | 1 033 |
+| `core` (base without code) | 14 | 4 645 | | `inspection` | 5 | 1 277 |
+| `code` | 3 | 1 492 | | `validation` | 2 | 695 |
+| `partdesign` | 49 | 13 186 | | `export` | 7 | 1 662 |
+| `drawing` | 18 | 9 018 | | `sheetmetal` | 1 | 443 |
+| `spreadsheet` | 10 | 3 424 | | all | 116 | 36 875 |
+
+A tool's weight is its name, description and input schema as JSON, at 4
+characters per token (an estimate). `python scripts/tool_weights.py` measures it
+without starting the server; pass a spec (`"@modelisation,-spreadsheet"`) to
+weigh that one.
+
 ## Documentation
 
 | Guide | Contents |
