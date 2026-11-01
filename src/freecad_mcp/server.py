@@ -820,6 +820,56 @@ MODELLING_GROUPS = register_modelling_tools(mcp, get_freecad_connection)
 
 CODE_TOOLS = ("execute_code", "execute_code_async", "execute_code_headless")
 
+# Named lists of groups for one stage of the work, written "@name" wherever a
+# spec names groups. "core" is "base" without the code tools, so no profile
+# lets a model run code; add it on purpose with "code" (e.g. "@inspection,code").
+TOOL_PROFILES: dict[str, tuple[str, ...]] = {
+    # model a part: sketch, features, parameters, files, checks, measures
+    "modelisation": ("core", "partdesign", "sheetmetal", "spreadsheet", "files", "validation", "inspection"),
+    # draft a TechDraw drawing of a finished part
+    "mise-en-plan": ("core", "drawing", "files", "inspection"),
+    # inspect, measure, validate and export a part
+    "inspection": ("core", "inspection", "validation", "files", "export"),
+}
+
+
+def tool_groups(names: list[str]) -> dict[str, list[str]]:
+    """The tool names of each group, given the names of every registered tool."""
+    modelling = {n for group in MODELLING_GROUPS.values() for n in group}
+    base = [n for n in names if n not in modelling]
+    return {"base": base, "core": [n for n in base if n not in CODE_TOOLS],
+            "code": [n for n in CODE_TOOLS if n in names], **MODELLING_GROUPS}
+
+
+def resolve_tool_spec(spec: str, groups: dict[str, list[str]]) -> list[str]:
+    """The tool names ``spec`` keeps, e.g. "base,drawing", "@modelisation,-spreadsheet".
+
+    A word is a group, a "@profile" (the groups of TOOL_PROFILES[profile]),
+    or either one prefixed with "-" to take it out of the rest. Raises
+    ValueError, listing the valid names, on an unknown group or profile.
+    """
+    wanted = [w.strip().lower() for w in spec.split(",") if w.strip()]
+
+    def expand(word: str) -> list[str]:
+        return list(TOOL_PROFILES[word[1:]]) if word.startswith("@") else [word]
+
+    taken_out = [w[1:].strip() for w in wanted if w.startswith("-")]
+    added = [w for w in wanted if not w.startswith("-")]
+    unknown = [w for w in added + taken_out if (w.startswith("@") and w[1:] not in TOOL_PROFILES)
+               or (not w.startswith("@") and w not in groups)]
+    if unknown or not added:
+        bad_profiles = [w for w in unknown if w.startswith("@")]
+        bad_groups = [w for w in unknown if not w.startswith("@")]
+        what = "; ".join(([f"Unknown tool group(s) {', '.join(bad_groups)}"] if bad_groups else [])
+                         + ([f"Unknown tool profile(s) {', '.join(bad_profiles)}"] if bad_profiles else [])
+                         or ["Unknown tool group(s) (none given)"])
+        raise ValueError(f"{what}; choose among the groups: {', '.join(groups)}; "
+                         f"or the profiles: {', '.join('@' + p for p in TOOL_PROFILES)}"
+                         " (prefix a group or profile with - to take it out, e.g. base,-code or @modelisation,-spreadsheet)")
+    names = [n for g in groups.values() for n in g]
+    keep = {n for w in added for g in expand(w) for n in groups[g]} - {n for w in taken_out for g in expand(w) for n in groups[g]}
+    return [n for n in dict.fromkeys(names) if n in keep]
+
 
 def keep_tool_groups(spec: str) -> list[str]:
     """Remove every tool outside the groups named in ``spec``, e.g. "base,drawing".
@@ -829,24 +879,18 @@ def keep_tool_groups(spec: str) -> list[str]:
     arbitrary Python (execute_code, execute_code_async, execute_code_headless),
     and a group written "-name" is taken out of the rest: "base,-code,drawing"
     serves FreeCAD to a model without letting it run code, for a client that
-    other people or web pages can reach. Each tool schema goes into the
-    model's prompt on every turn, so a small local model works better with
-    only the groups the task needs. Returns the names of the tools kept.
+    other people or web pages can reach. "core" is "base" without "code".
+    A word written "@name" is a profile, a named list of groups for one stage
+    of the work ("@modelisation", "@mise-en-plan", "@inspection"; see
+    TOOL_PROFILES), and combines like a group: "@modelisation,-spreadsheet".
+    Each tool schema goes into the model's prompt on every turn, so a small
+    local model works better with only the tools the task needs. Returns the
+    names of the tools kept.
     """
     import asyncio
 
     names = [t.name for t in asyncio.run(mcp.list_tools())]
-    modelling = {n for group in MODELLING_GROUPS.values() for n in group}
-    groups = {"base": [n for n in names if n not in modelling], "code": [n for n in CODE_TOOLS if n in names],
-              **MODELLING_GROUPS}
-    wanted = [g.strip().lower() for g in spec.split(",") if g.strip()]
-    taken_out = [g[1:].strip() for g in wanted if g.startswith("-")]
-    added = [g for g in wanted if not g.startswith("-")]
-    unknown = [g for g in added + taken_out if g not in groups]
-    if unknown or not added:
-        raise ValueError(f"Unknown tool group(s) {', '.join(unknown) or '(none given)'}; choose among: {', '.join(groups)}"
-                         " (prefix a group with - to take it out, e.g. base,-code)")
-    keep = {n for g in added for n in groups[g]} - {n for g in taken_out for n in groups[g]}
+    keep = set(resolve_tool_spec(spec, tool_groups(names)))
     for name in names:
         if name not in keep:
             mcp.remove_tool(name)
@@ -895,7 +939,9 @@ def main():
         "--tools",
         default=None,
         help="Tool groups to expose, comma separated, e.g. 'base,files,inspection' "
-        "(groups: base, code, " + ", ".join(MODELLING_GROUPS) + "; -name takes a group out, e.g. base,-code; default: all; falls "
+        "(groups: base, core, code, " + ", ".join(MODELLING_GROUPS) + "; profiles: "
+        + ", ".join("@" + p for p in TOOL_PROFILES) + "; -name takes a group or profile out, "
+        "e.g. base,-code or @modelisation,-spreadsheet; default: all; falls "
         "back to the FREECAD_MCP_TOOLS environment variable). Fewer tools make a "
         "smaller prompt, which helps a small local model",
     )
